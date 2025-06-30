@@ -1,0 +1,622 @@
+Lecture Notes Transaction Management and Concurrency Control
+
+1. Introduction to Transaction Management
+
+A transaction in the context of databases represents a logical unit of work that must be executed completely or not executed at all. A transaction can consist of one or more database operations that transition it from one consistent state to another.
+
+The concept of transactions is fundamental to modern database management systems (DBMS) because it provides:
+
+1. Data integrity — ensures that data remains in a consistent state even during system failures or concurrent access.
+2. Operation isolation — allows multiple users to work with the database simultaneously without interfering with each other.
+3. Reliability — ensures the persistence of changes after they are confirmed.
+4. Atomicity — guarantees that all operations within a transaction are either executed completely or not executed at all.
+
+1970s — formation of the theoretical foundations of transactions. Edgar Codd laid the groundwork for understanding transactions in his relational data model. At the same time, Jim Gray began research in the field of transaction processing.
+1981 — Jim Gray formalized the concept of ACID properties for transactions, which became the standard for relational DBMSs.
+
+In single-user database management systems (DBMS), data access is performed by only one user at any given time. That allows for implementation simplicity — no need for locking mechanisms, transaction isolation, and conflict resolution. No resource competition makes system performance more predictable. Data is always in a consistent state from the perspective of the single user.
+
+Multi-user DBMSs allow multiple users/sessions to work with a single database simultaneously. This creates a number of fundamental problems that require special resolution mechanisms.
+
+Lost Update Problem
+
+Occurs when two users simultaneously read and then update the same data, resulting in the loss of changes made by one of the users.
+
+Example:
+- User A reads an account balance: 1000 rubles
+- User B reads the same account balance: 1000 rubles
+- User A adds 200 rubles and writes: 1200 rubles
+- User B adds 500 rubles and writes: 1500 rubles
+- Result: User A's update is "lost," the final amount should be 1700 rubles
+
+Dirty Read Problem
+
+Occurs when a transaction reads data that has been modified by another uncommitted transaction.
+
+Example:
+- Transaction A changes an account balance from 1000 to 1500 rubles
+- Transaction B reads the account balance: 1500 rubles
+- Transaction A rolls back
+- Transaction B works with the incorrect value of 1500 rubles, although the real value is 1000 rubles
+
+Non-repeatable Read Problem
+
+Occurs when a transaction reads the same data again and discovers that it has been modified by another committed transaction.
+
+Example:
+- Transaction A reads an account balance: 1000 rubles
+- Transaction B changes the account balance to 1500 rubles and commits the changes
+- Transaction A reads the account balance again: 1500 rubles
+- Result: within the same transaction A, different values are obtained
+
+Phantom Read Problem
+
+Occurs when a transaction re-executes a query that returns a set of rows and discovers that the set of rows has changed due to another committed transaction.
+
+Example:
+- Transaction A executes a query: "Select all accounts with a balance > 1000 rubles" (result: 5 rows)
+- Transaction B creates a new account with a balance of 2000 rubles and commits the changes
+- Transaction A re-executes the same query (result: 6 rows)
+- Result: a "phantom" row has appeared
+
+Serialization Anomaly
+
+Occurs when the result of successfully executing a group of transactions is not consistent with any possible order of their sequential execution.
+
+Example:
+- Transaction A checks the condition X > Y (true) and sets X = X - 10
+- Transaction B checks the condition Y > Z (true) and sets Y = Y - 10
+- Transaction C checks the condition Z > X (true) and sets Z = Z - 10
+- Result: all three conditions cannot be simultaneously true in sequential execution
+
+To solve problems arising in multi-user systems, DBMSs use various concurrent access control mechanisms:
+1. Locking — a mechanism that make other transactions wait until the current transaction completes its work with that data.
+2. Multiversion Concurrency Control (MVCC) — a mechanism where each transaction works with its own version of the data, making reads wait-free.
+3. Timestamping — a mechanism that assigns a timestamp to each transaction and uses it to determine the order of data access.
+4. Optimistic Concurrency Control — a mechanism that allows transactions to work without locks but checks for conflicts before committing changes.
+5. Transaction Isolation Levels — a mechanism that determines how much one transaction is isolated from changes made by other transactions.
+
+These mechanisms allow multi-user DBMSs to provide:
+
+- Parallel execution of transactions — improving system performance through simultaneous processing of multiple transactions.
+- Data consistency — guaranteeing that data remains in a consistent state even with concurrent access.
+- Transaction isolation — guaranteeing that transactions do not affect each other in unpredictable ways.
+- Scalability — the ability to serve a growing number of users without significant performance degradation.
+
+In PostgreSQL, as in other modern DBMSs, all these mechanisms are implemented, allowing effective solutions to problems of concurrent data access.
+
+2. Basic Concepts of Transactions
+
+Definition of a Transaction as a Unit of Work
+
+A transaction in the context of databases represents a logical unit of work that transitions the database from one consistent state to another. A transaction can consist of one or more database operations (INSERT, UPDATE, DELETE, SELECT) that are considered as a single entity.
+
+The key feature of a transaction is that it must be executed completely or not executed at all. This property (atomicity) ensures data integrity even in the case of system failures or concurrent access by multiple users.
+
+The BEGIN statement marks the beginning of a transaction. After executing this statement, all subsequent commands will be executed in the context of one transaction until the COMMIT or ROLLBACK statement is executed.
+
+The COMMIT statement completes the transaction and saves all changes made within this transaction. After executing COMMIT, the changes become permanent and visible to other transactions.
+
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE account_id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE account_id = 2;
+COMMIT;
+
+The ROLLBACK statement cancels all changes made within the current transaction and ends the transaction. The database returns to the state it was in before the transaction began.
+
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE account_id = 1;
+-- An error or business rule violation is detected
+ROLLBACK;
+
+
+A transaction in PostgreSQL can be in one of the following states:
+
+1. Active — the transaction has started (executed BEGIN) but has not yet completed. In this state, the transaction can perform read and write operations.
+2. Partially Committed — the transaction has performed its last operation but has not yet been committed. The system checks if any constraints have been violated.
+3. Committed — the transaction has been successfully completed (executed COMMIT), all changes are saved in the database.
+4. Failed — the transaction cannot be successfully completed due to an error or constraint violation.
+5. Aborted — the transaction has been canceled (executed ROLLBACK), all changes are canceled, the database is returned to the state before the transaction began.
+
+Explicit transactions begin with the BEGIN statement and end with the COMMIT or ROLLBACK statements. This approach gives full control over transaction boundaries and is recommended for most use cases.
+In PostgreSQL, each SQL statement executed outside an explicit transaction is automatically executed in its own implicit transaction.
+
+UPDATE accounts SET balance = balance - 100 WHERE account_id = 1;
+-- Automatic COMMIT after executing the statement
+UPDATE accounts SET balance = balance + 100 WHERE account_id = 2;
+-- Automatic COMMIT after executing the statement
+
+With implicit transactions it's impossible to combine multiple statements into a single atomic operation, and it's impossible to perform a rollback.
+
+PostgreSQL also supports savepoints, which allow for partial rollback of a transaction. Savepoints are particularly useful in complex transactions where it may be necessary to cancel only part of the operations.
+
+
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE account_id = 1;
+SAVEPOINT my_savepoint;
+UPDATE accounts SET balance = balance + 100 WHERE account_id = 2;
+-- If something went wrong with the transfer to the second account
+ROLLBACK TO my_savepoint;
+-- Now we can try to transfer to another account
+UPDATE accounts SET balance = balance + 100 WHERE account_id = 3;
+COMMIT;
+
+
+The main operators for working with savepoints:
+
+1. SAVEPOINT point_name — creates a new savepoint.
+2. ROLLBACK TO point_name — rolls back the transaction to the specified savepoint.
+3. RELEASE SAVEPOINT point_name — removes the savepoint but does not affect the transaction operations.
+
+Savepoints allow for creating more flexible and error-resistant transactions, especially in complex business processes.
+
+3. ACID Properties
+
+ACID is an acronym that stands for four key properties of database transactions: Atomicity, Consistency, Isolation, and Durability. These properties guarantee the reliability and predictability of transactions even under system failures and concurrent access.
+
+3.1. Atomicity
+Atomicity guarantees that a transaction is executed as a single unit: either all operations of the transaction are executed successfully, or no trace of execution attempt is present.
+
+In PostgreSQL, atomicity is ensured through the following mechanisms:
+
+1. Write-Ahead Log (WAL) — all changes are first recorded in a log, and then applied to the database. This allows for recovering or canceling a transaction in case of failure.
+2. Buffer Cache — changes are first made to the buffer cache in memory, not directly to disk, which makes it easy to undo changes if the transaction does not complete successfully.
+3. Row Version Management — PostgreSQL uses Multi-Version Concurrency Control (MVCC), which creates new versions of rows when data is changed, preserving old versions until the transaction is completed.
+
+BEGIN;
+-- Withdrawing money from one account
+UPDATE accounts SET balance = balance - 1000 WHERE account_id = 1;
+-- Depositing to another account
+UPDATE accounts SET balance = balance + 1000 WHERE account_id = 2;
+COMMIT;
+
+If a failure occurs between the two UPDATE operations, PostgreSQL guarantees that upon system recovery, either both operations will be performed or neither of them, preventing money loss or duplication.
+
+3.2. Consistency
+
+Consistency guarantees that a transaction transitions the database from one consistent state to another consistent state. A consistent state means that all data in the database complies with certain integrity rules, including constraints, triggers, and cascading actions.
+
+1. Primary Key Constraints — primary key values must be unique.
+2. Foreign Key Constraints — foreign key values must correspond to existing primary key values in the parent table.
+3. CHECK Constraints — values must satisfy certain conditions.
+
+Example of ensuring consistency in PostgreSQL:
+-- Creating a table with constraints
+CREATE TABLE accounts (
+    account_id INT PRIMARY KEY,
+    customer_id INT NOT NULL REFERENCES customers(customer_id),
+    balance DECIMAL(15,2) NOT NULL CHECK (balance >= 0),
+    account_type VARCHAR(10) NOT NULL
+);
+
+-- Transaction with consistency check
+BEGIN;
+UPDATE accounts SET balance = balance - 1000 WHERE account_id = 1;
+-- If the balance becomes negative, the transaction will be canceled due to violation of the CHECK constraint
+COMMIT;
+
+In this example, the CHECK constraint guarantees that the account balance cannot become negative. If the UPDATE operation results in a negative balance, the transaction will be canceled, and the database will remain in a consistent state.
+
+3.3. Isolation
+
+Isolation guarantees that concurrently executing transactions do not affect each other. Each transaction operates as if it were the only one in the system, despite the fact that in reality hundreds or thousands of transactions may be executing simultaneously.
+
+Problems of Concurrent Transaction Execution
+1. Dirty Read — a transaction reads data modified by another uncommitted transaction.
+2. Non-repeatable Read — a transaction reads data again and finds that it has been modified by another committed transaction.
+3. Phantom Read — a transaction re-executes a query and discovers that the set of rows satisfying the condition has changed.
+4. Serialization Anomaly — the result of concurrent execution of transactions does not correspond to any possible sequential execution of these transactions.
+
+The SQL standard defines four transaction isolation levels, which differ in the degree of isolation and possible anomalies:
+
+1. READ UNCOMMITTED — the lowest isolation level, allows all types of anomalies.
+2. READ COMMITTED — prevents dirty reads, but allows non-repeatable and phantom reads.
+3. REPEATABLE READ — prevents dirty and non-repeatable reads, but allows phantom reads.
+4. SERIALIZABLE — the highest isolation level, prevents all types of anomalies.
+
+PostgreSQL has three levels:
+
+- READ UNCOMMITTED in PostgreSQL is impossible to achieve (no dirty reads anyway).
+- REPEATABLE READ in PostgreSQL also prevents phantom reads, which goes beyond the requirements of the SQL standard.
+- SERIALIZABLE in PostgreSQL uses a predicate-based serialization mechanism that detects all possible conflicts between parallel transactions.
+
+-- Setting the isolation level for the current transaction
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+-- Transaction operations
+COMMIT;
+
+-- Setting the default isolation level for the session
+SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+
+3.4. Durability
+
+Durability guarantees that after a transaction is successfully completed (COMMIT), all changes made by this transaction are preserved in the database even in the event of system failure, power outage, or other emergency situations.
+
+In PostgreSQL, durability is ensured through the following mechanisms:
+
+1. Write-Ahead Log (WAL) — all changes are first recorded in a log on disk before they are applied to data files. This allows for recovering changes after a failure.
+2. Checkpoints — periodically, all "dirty" buffers (modified but not written to disk) are written to disk, which minimizes the amount of work during recovery.
+3. Synchronous Commit — by default, PostgreSQL waits until WAL records are reliably saved to disk before informing the client about the successful completion of the transaction.
+
+-- Enabling synchronous commit (default)
+SET synchronous_commit = on;
+
+-- Disabling synchronous commit to improve performance
+-- (with the risk of losing recent transactions in case of failure)
+SET synchronous_commit = off;
+
+-- Configuring checkpoint frequency
+ALTER SYSTEM SET checkpoint_timeout = '5min';
+ALTER SYSTEM SET max_wal_size = '1GB';
+
+ACID properties are closely interrelated and complement each other:
+
+- Atomicity ensures the integrity of individual transactions.
+- Consistency guarantees that the database complies with all rules and constraints.
+- Isolation prevents mutual influence of parallel transactions.
+- Durability ensures the preservation of changes after they are committed.
+
+Together, these properties create a reliable foundation for working with data in a multi-user environment, ensuring the integrity and predictability of database behavior even in complex conditions.
+
+PostgreSQL 16 fully supports all ACID properties, making it a reliable system for mission-critical applications where data integrity is of paramount importance.
+
+4. Isolation and Serializability
+
+Serial transaction execution is a mode of operation where transactions are executed one after another, without overlapping in time. Each transaction begins only after the previous one has completely finished.
+
+In this mode, there are no problems with concurrent data access, since only one transaction is working with the database at any given time. This ensures maximum isolation and predictability of results.
+
+Example of serial transaction execution:
+
+
+Time   | Transaction A                | Transaction B
+-------|----------------------------|---------------------------
+t1     | BEGIN                      |
+t2     | UPDATE accounts SET ...    |
+t3     | SELECT * FROM accounts ... |
+t4     | COMMIT                     |
+t5     |                            | BEGIN
+t6     |                            | UPDATE accounts SET ...
+t7     |                            | SELECT * FROM accounts ...
+
+t8     |                            | COMMIT
+
+
+Benefits of Parallel Execution
+
+Although serial transaction execution provides maximum isolation, it has a serious drawback — low performance, especially in multi-user systems. Parallel (or intermixed) transaction execution allows for significantly improving performance through:
+
+1. Increased throughput — the system can process more transactions per unit of time.
+2. Reduced response time — users get results faster, as they don't need to wait for other transactions to complete.
+3. Efficient resource utilization — while one transaction is waiting for I/O operations to complete, other transactions can use the processor.
+4. Scalability — the system can serve a growing number of users without a proportional decrease in performance.
+
+Example of parallel transaction execution with a lost update problem:
+
+Time   | Transaction A                | Transaction B
+-------|----------------------------|---------------------------
+t1     | BEGIN                      | BEGIN
+t2     | SELECT balance FROM accounts WHERE id = 1; -- Received: 1000 |
+t3     |                            | SELECT balance FROM accounts WHERE id = 1; -- Received: 1000
+t4     | UPDATE accounts SET balance = 1000 - 100 WHERE id = 1; |
+t5     | COMMIT                     |
+t6     |                            | UPDATE accounts SET balance = 1000 + 200 WHERE id = 1;
+t7     |                            | COMMIT
+
+
+In this example, after both transactions are executed, the account balance will be 1200, although it should be 1100 (1000 - 100 + 200). The change made by transaction A was "lost."
+
+A schedule is a sequence of read and write operations from different transactions, ordered by execution time. A schedule shows how operations from different transactions interleave over time.
+
+Formally, a schedule can be represented as a sequence of operations of the form:
+- Ri(X) — read operation by transaction i of data element X
+- Wi(X) — write operation by transaction i of data element X
+- Ci — commit operation of transaction i
+- Ai — abort operation of transaction i
+
+A serial schedule is a schedule in which the operations of each transaction are executed without interleaving with operations of other transactions. In a serial schedule, for any two transactions, all operations of one transaction are executed before any operation of the other transaction begins.
+
+Example of a serial schedule for two transactions T1 and T2:
+S1: R1(A), W1(A), R1(B), W1(B), C1, R2(A), W2(A), R2(C), W2(C), C2
+
+In this schedule, all operations of transaction T1 are executed before any operation of transaction T2 begins.
+
+A serializable schedule is a schedule that is equivalent to some serial schedule. In other words, the result of executing a serializable schedule is the same as if the transactions were executed sequentially in some order.
+
+Serializability is a key property that guarantees the correctness of parallel transaction execution. If a schedule is serializable, it does not contain anomalies associated with parallel execution.
+
+Example of a serializable schedule:
+S2: R1(A), R2(C), W1(A), R1(B), W2(C), W1(B), C1, R2(A), W2(A), C2
+
+
+This schedule is equivalent to the serial schedule S1, despite the fact that operations of transactions T1 and T2 are interleaved.
+
+Conflict serializability is a practical way to determine if a schedule is serializable. Two operations are in conflict if they are executed in different transactions, access the same data element, and at least one of them is a write operation.
+
+Types of conflicts:
+1. Read-Write (R-W): one transaction reads data, and another modifies it.
+2. Write-Read (W-R): one transaction modifies data, and another reads it.
+3. Write-Write (W-W): both transactions modify the same data.
+
+A schedule is conflict-serializable if it can be transformed into a serial schedule by swapping non-conflicting operations.
+
+Ensuring Serializability
+
+A conflict graph is a directed graph used to determine the conflict serializability of a schedule. In this graph:
+- Vertices represent transactions.
+- A directed edge from Ti to Tj exists if an operation of transaction Ti conflicts with an operation of transaction Tj, and the Ti operation is executed before the Tj operation.
+
+A schedule is conflict-serializable if and only if its conflict graph does not contain cycles.
+
+Example of a conflict graph for a serializable schedule:
+T1 --> T2
+
+Example of a conflict graph for a non-serializable schedule:
+T1 --> T2
+^      |
+|      v
+T3 <-- T4
+
+
+There are several protocols that guarantee the serializability of schedules:
+
+1. Two-Phase Locking (2PL) Protocol — a transaction must acquire all necessary locks before releasing any lock. This divides the execution of a transaction into a lock acquisition phase and a lock release phase.
+2. Timestamp Ordering Protocol — each transaction is assigned a unique timestamp at startup, and operations are executed in the order of these timestamps.
+3. Multi-Version Concurrency Control (MVCC) — multiple versions are stored for each data element, allowing transactions to read consistent data without locks.
+4. Optimistic Concurrency Control (OCC) — transactions are executed without locks, but before committing, it is checked whether conflicts with other transactions have occurred.
+
+In PostgreSQL, a combination of MVCC and a special serialization anomaly detection mechanism is used to ensure serializability, which tracks dependencies between transactions and detects potential cycles in the dependency graph.
+
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+-- Transaction operations
+COMMIT;
+
+When a serialization conflict occurs, PostgreSQL aborts one of the conflicting transactions with an error:
+
+ERROR:  could not serialize access due to read/write dependencies among transactions
+DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+HINT:  The transaction might succeed if retried.
+
+In this case, the application must retry the transaction.
+
+5. Concurrency Control
+
+Concurrency control refers to mechanisms that ensure the correct execution of parallel transactions. There are two main approaches to concurrency control: pessimistic and optimistic.
+
+Pessimistic concurrency control is based on the assumption that conflicts between transactions occur frequently, so they need to be prevented in advance. The main mechanism of pessimistic control is locking.
+
+Key characteristics of pessimistic control:
+
+1. Conflict prevention — a transaction locks data before accessing it, preventing access by other transactions.
+2. Waiting for access — if data is locked, a transaction waits for it to be released.
+3. Guaranteed correctness — after obtaining a lock, a transaction is guaranteed to be able to work with the data without conflicts.
+4. Possibility of deadlocks — situations of mutual blocking (deadlock) can occur.
+
+Example of pessimistic control in PostgreSQL:
+BEGIN;
+-- Locking a row for update
+SELECT * FROM accounts WHERE account_id = 1 FOR UPDATE;
+-- Now other transactions cannot modify this row until the current transaction completes
+UPDATE accounts SET balance = balance - 100 WHERE account_id = 1;
+COMMIT;
+
+
+Optimistic concurrency control is based on the assumption that conflicts between transactions occur rarely, so transactions can be allowed to execute without locks, and then the presence of conflicts can be checked before committing.
+
+Key characteristics of optimistic control:
+
+1. Absence of locks — transactions work with data without locks.
+2. Conflict checking — before committing, a transaction checks whether the data has changed since it was read.
+3. Rollback on conflict — if a conflict is detected, the transaction is rolled back and can be restarted.
+4. No deadlocks — since locks are not used, deadlocks are impossible.
+
+Example of optimistic control in PostgreSQL:
+
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+-- Reading data without locking
+SELECT balance FROM accounts WHERE account_id = 1;
+-- Performing operations
+UPDATE accounts SET balance = balance - 100 WHERE account_id = 1;
+-- At COMMIT, PostgreSQL will check if conflicts have occurred
+COMMIT;
+-- If a conflict occurred, a serialization error will be issued, and the transaction needs to be repeated
+
+
+Comparison of Approaches
+
+| Characteristic | Pessimistic Control | Optimistic Control |
+|----------------|-------------------------|------------------------|
+| Locks | Uses locks | Does not use locks |
+| Performance with low contention | Lower due to lock overhead | Higher as there are no locks |
+| Performance with high contention | Higher as there are fewer rollbacks | Lower due to frequent rollbacks and retries |
+| Probability of deadlocks | High | None |
+| Implementation complexity | Medium | High |
+| Resource usage | Locks occupy memory | Data versions occupy disk space |
+| Typical use cases | Highly concurrent environments with frequent conflicts | Environments with rare conflicts, analytical queries |
+
+PostgreSQL supports both approaches: pessimistic control through explicit locks and optimistic control through serializable isolation level and MVCC.
+
+5.2. Two-Phase Locking
+
+Two-Phase Locking (2PL) is a protocol that guarantees the serializability of concurrently executing transactions. It is the foundation of pessimistic concurrency control. 2PL splits the execution of a transaction into two phases:
+1. Growing Phase — a transaction can only acquire new locks but cannot release already acquired ones.
+2. Shrinking Phase — a transaction can only release locks but cannot acquire new ones.
+
+The transition point from the first phase to the second is called the lock point.
+
+In the growing phase, a transaction requests all necessary locks before performing operations with data:
+
+1. For read operations, shared locks are requested.
+2. For write operations, exclusive locks are requested.
+
+If the requested lock conflicts with a lock held by another transaction, the current transaction waits for the lock to be released.
+
+BEGIN;
+-- Acquiring a shared lock for reading
+SELECT * FROM accounts WHERE account_id = 1 FOR SHARE;
+-- Acquiring an exclusive lock for writing
+SELECT * FROM transactions WHERE transaction_id = 100 FOR UPDATE;
+-- Now the transaction has all the necessary locks
+
+In the shrinking phase, a transaction releases previously acquired locks. In most DBMSs, including PostgreSQL, all locks are automatically released when the transaction completes (COMMIT or ROLLBACK).
+
+-- After performing all operations
+COMMIT;  -- All locks are automatically released
+
+
+Strict Two-Phase Locking (Strict 2PL) is a variant of 2PL where all exclusive locks are held until the transaction completes. This prevents cascading rollbacks and ensures the recoverability of the schedule.
+
+PostgreSQL uses strict two-phase locking, which means:
+1. All locks (both shared and exclusive) are held until the transaction completes.
+2. A transaction cannot release locks until it commits or rolls back.
+
+This simplifies implementation and provides a higher level of isolation but can lead to locks being held for longer periods.
+
+5.3. Locks and Deadlocks
+
+In PostgreSQL, there are various types of locks that can be divided into two main categories:
+
+1. Table-level locks:
+
+- ACCESS SHARE — the least restrictive lock, used for read operations (SELECT).
+- ROW SHARE — used for SELECT FOR UPDATE/SHARE operations.
+- ROW EXCLUSIVE — used for UPDATE, DELETE, INSERT operations.
+- SHARE UPDATE EXCLUSIVE — used for VACUUM, ANALYZE, CREATE INDEX CONCURRENTLY.
+- SHARE — used for CREATE INDEX (without CONCURRENTLY).
+- SHARE ROW EXCLUSIVE — used for CREATE TRIGGER, some forms of ALTER TABLE.
+- EXCLUSIVE — blocks all operations except reading.
+- ACCESS EXCLUSIVE — blocks all operations, including reading. Used for DROP TABLE, TRUNCATE, VACUUM FULL.
+
+2. Row-level locks:
+
+- FOR UPDATE — locks rows for update, preventing them from being modified or locked by other transactions.
+- FOR NO KEY UPDATE — similar to FOR UPDATE but less restrictive.
+- FOR SHARE — allows other transactions to acquire FOR SHARE locks but blocks FOR UPDATE.
+- FOR KEY SHARE — the least restrictive row lock.
+
+A deadlock occurs when two or more transactions mutually block each other, waiting for resources to be released. The following conditions are necessary for a deadlock to occur:
+
+1. Mutual exclusion — resources cannot be used simultaneously by multiple transactions.
+2. Hold and wait — transactions hold already acquired resources while waiting to acquire additional ones.
+3. No preemption — resources cannot be forcibly taken away from transactions.
+4. Circular wait — there exists a closed chain of transactions where each is waiting for a resource held by the next.
+
+Example of a deadlock:
+
+Transaction A:                      Transaction B:
+BEGIN;                             BEGIN;
+UPDATE accounts SET ... WHERE id=1; UPDATE accounts SET ... WHERE id=2;
+-- Waiting for lock on id=2        -- Waiting for lock on id=1
+UPDATE accounts SET ... WHERE id=2; UPDATE accounts SET ... WHERE id=1;
+
+In this example, transaction A locks the row with id=1 and waits for access to the row with id=2, while transaction B locks the row with id=2 and waits for access to the row with id=1. Neither transaction can continue execution.
+
+PostgreSQL automatically detects deadlocks using a cycle detection algorithm in the wait-for graph. When a transaction waits for a lock to be released for more than a certain time (default is 1 second), PostgreSQL checks whether this situation forms a cycle in the wait-for graph.
+
+A wait-for graph is a directed graph where:
+- Vertices represent transactions.
+- An edge from transaction A to transaction B means that A is waiting for a resource held by B.
+
+If a cycle is detected in the graph, it indicates the presence of a deadlock.
+
+There are several methods to prevent deadlocks:
+
+1. Resource ordering — transactions always request resources in the same order.
+   -- Always update rows in ascending id order
+   UPDATE accounts SET ... WHERE id = LEAST(1, 2);
+   UPDATE accounts SET ... WHERE id = GREATEST(1, 2);
+2. Timeouts — if a transaction cannot obtain a lock within a certain time, it rolls back.
+   -- Setting a timeout for locks
+   SET lock_timeout = '5s';
+3. Preventing the hold-and-wait condition — a transaction requests all necessary resources simultaneously or releases all resources when it cannot obtain a new one.
+4. Detection and resolution — the system detects deadlocks and automatically cancels one of the transactions to resolve them.
+
+PostgreSQL uses the last approach: when a deadlock is detected, one of the transactions is 
+automatically canceled with an error message:
+
+ERROR:  deadlock detected
+DETAIL:  Process 1234 waits for ShareLock on transaction 5678; blocked by process 5678.
+Process 5678 waits for ShareLock on transaction 1234; blocked by process 1234.
+HINT:  See server log for query details.
+
+After this, the application must retry the canceled transaction.
+
+6. Isolation Levels and Their Implementation
+
+6.1. Standard SQL Isolation Levels
+
+The SQL standard defines four transaction isolation levels that differ in the degree of isolation and possible anomalies. These isolation levels allow finding a balance between data consistency and system performance.
+
+READ UNCOMMITTED is the lowest isolation level, where a transaction can see uncommitted changes from other transactions.
+Possible anomalies:
+- Dirty Read
+- Non-repeatable Read
+- Phantom Read
+- Serialization Anomaly
+
+In PostgreSQL, the READ UNCOMMITTED level is implemented the same as READ COMMITTED, meaning dirty reads are not possible.
+
+READ COMMITTED is an isolation level where a transaction sees only committed changes from other transactions. This prevents dirty reads but allows non-repeatable and phantom reads.
+Possible anomalies:
+- Non-repeatable Read
+- Phantom Read
+- Serialization Anomaly
+
+READ COMMITTED is the default isolation level in PostgreSQL. It is implemented using Multi-Version Concurrency Control (MVCC):
+
+1. Each transaction sees a snapshot of data at the time each query begins.
+2. A query sees only those changes that were committed before the query began.
+3. The transaction's own changes are always visible.
+
+REPEATABLE READ is an isolation level where a transaction sees only the data that was committed before the transaction started, and its own changes. This prevents dirty and non-repeatable reads.
+Possible anomalies (according to the SQL standard):
+- Phantom Read
+- Serialization Anomaly
+
+In PostgreSQL, the REPEATABLE READ level also prevents phantom reads, which goes beyond the requirements of the SQL standard.
+In PostgreSQL, the REPEATABLE READ level is implemented using a data snapshot:
+
+1. Each transaction sees a snapshot of data at the time the transaction begins.
+2. All queries in the transaction see the same state of the database.
+3. Changes made by other transactions after the current transaction began are not visible.
+4. The transaction's own changes are always visible.
+
+SERIALIZABLE is the highest isolation level, which guarantees that the result of parallel execution of transactions is equivalent to some sequential execution of these transactions. This prevents all types of anomalies.
+Possible anomalies:
+- No anomalies
+
+In PostgreSQL, the SERIALIZABLE level is implemented using predicate locks and serialization anomaly detection:
+
+1. Each transaction sees a snapshot of data at the time the transaction begins (as in REPEATABLE READ).
+2. Additionally, read-write dependencies between transactions are tracked.
+3. If a potential serialization anomaly is detected, one of the transactions is aborted with an error.
+
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+SELECT * FROM accounts WHERE balance > 1000;
+-- If another transaction modifies data satisfying this condition and commits the changes
+UPDATE accounts SET balance = balance + 100 WHERE balance > 1000;
+-- When attempting to commit the transaction, a serialization error may occur
+COMMIT;
+
+When a serialization error occurs, the application must retry the transaction:
+
+ERROR:  could not serialize access due to read/write dependencies among transactions
+DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+HINT:  The transaction might succeed if retried.
+
+Example of a serialization anomaly (which is prevented):
+
+Transaction A:                      Transaction B:
+BEGIN;                             BEGIN;
+SELECT SUM(amount) FROM transfers  SELECT SUM(amount) FROM transfers
+WHERE account_id = 1; -- 1000     WHERE account_id = 2; -- 500
+                                  INSERT INTO transfers VALUES (2, 300);
+                                  COMMIT;
+INSERT INTO transfers VALUES (1, 200);
+COMMIT;
+

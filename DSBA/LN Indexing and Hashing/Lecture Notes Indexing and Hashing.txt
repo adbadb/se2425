@@ -1,0 +1,880 @@
+Lecture Notes: Indexing and Hashing
+
+1. Introduction to Indexes
+
+Indexes are one of the primary methods for optimizing query performance. From the official PostgreSQL documentation: "Indexes are a common way to enhance database performance. An index allows the database server to find and retrieve specific rows much faster than it could do without an index."
+
+A full table scan (in PostgreSQL, this is called a Sequential Scan) on large, unordered (heap) tables to find data (e.g., for conditions in WHERE or JOIN), grouping, or sorting can become a bottleneck—either the amount of data becomes too large, or the intensity of the query stream grows too high.
+
+Imagine a situation: we have a table with millions of customer records, and we need to find all customers by a known postal code. Without an index, the DBMS would have to scan every record in the table, checking the postal code value—an operation with linear complexity O(N), where N is the number of records (or the blocks in which they are stored). For large data volumes, this approach becomes impractical.
+
+The idea is to create and maintain an additional data structure, associated with the table, that allows the DBMS to find rows quickly. But how can such a structure be designed?
+
+We will refer to the part of a record used for fast lookups as the index key (this can be a column, multiple columns, or a deterministic function of them). The table's primary key is the first candidate for an index key (and an index is usually created on it automatically), but it's far from the only one.
+In addition to the index key, most indexes store physical pointers to the records (in PostgreSQL, this pointer is called a TID - Tuple Identifier, which contains the data block number and the item number within the block).
+
+First option: Sort the data by the index key so that a binary search can be used. The search complexity is O(log N). The main drawback is the high cost of modifications: each time a key is added, it must be "squeezed" into its sorted position, making the complexity O(N).
+
+A convenient feature of sorted keys is that you can search for a specific value (point query), values within a given interval (range query), and, for example, by a text value's prefix (a special case of a range query).
+
+A similar method, the Indexed Sequential Access Method (ISAM), has been in use since 1968 (IBM IMS). The first storage method in MySQL was called MyISAM and was based on this concept.
+
+Second option: Hash the data using an extendible or other hashing scheme. The search complexity is O(1), but only point queries are possible; you cannot search by prefix or range.
+
+There are other, more exotic options. For example, if we consider an index as a function from an index key to a set of TIDs, we could build and train, for instance, a neural network or a boosted tree ensemble, and obtain the TID from such a model.
+
+It's important to understand that while indexes can significantly speed up searches, they increase overhead. Each index requires additional storage space. Each index must be updated every time the values in the indexed columns change. This means that all insert, update, and delete operations are guaranteed to become slower. Meanwhile, there is no guarantee that an index will speed up reads. Creating indexes is always a trade-off between read speed and write speed.
+
+2. Indexing Methods
+
+2.1. By Internal Index Structure
+
+ 2.1.1. B+Tree (Balanced Tree) Indexes
+- A balanced (all leaves have the same depth) and highly branching (tens to hundreds of outgoing edges per node) tree.
+  - Leaf nodes store the keys in sorted order.
+  - Non-leaf nodes (internal nodes) contain keys that separate the value intervals of their child nodes.
+  - The insert/delete algorithm maintains the tree's balance (depth always increases for all nodes of the tree simultaneously).
+- What it can speed up:
+  - Point queries (WHERE id = 123)
+  - Range queries (WHERE age BETWEEN 18 AND 30)
+  - Sorting ORDER BY on the index key or its prefix
+  - Grouping GROUP BY on the index key or its prefix
+  - Window functions OVER with the index key or its prefix in PARTITION BY and/or ORDER BY
+  - Selecting unique records DISTINCT on the index key or its prefix
+- Features:
+  - The search result is sorted by the key.
+- Used by default in almost all RDBMSs if the index type is not explicitly specified.
+  - CREATE INDEX idx_name ON table (column)
+
+2.1.2. Hash Indexes
+- A hash table. Key → hash function → bucket number → contains a pointer to the record.
+- What it can speed up: Only point queries (= and IN with a list of values).
+- Features:
+  - The search result is unordered.
+  - The key must be specified in its entirety (not a part or a prefix).
+- In different DBMSs:
+  - PostgreSQL 10+: CREATE INDEX ... USING HASH (col). In PostgreSQL before version 10, hash indexes were unreliable and had to be manually rebuilt after a crash.
+  - SQL Server and Oracle do not have "pure" Hash indexes for tables (but some join algorithms build hash tables).
+
+2.1.3. Bitmap Indexes
+- A bit array for each key value. The array has one bit (yes/no) for each record in the table.
+- Essentially a different way of storing a list of pointers to records.
+- Can speed up searches:
+  - On columns with a small number (a few to tens) of unique values (gender, statuses, categories).
+  - Complex conditions on several such columns WHERE gender = 'M' AND status = 'Active' — fast bitwise operations on arrays.
+  - In OLAP and analytical data warehouses.
+- Features:
+  - Inefficient for inserting/deleting a single key; it's better to batch changes or rebuild the index entirely.
+- In different DBMSs:
+  - PostgreSQL: Not available out-of-the-box. It can build bitmap arrays during query execution but does not store them.
+  - SQL Server: No pure form, but the Columnstore Index works similarly.
+  - Oracle: CREATE BITMAP INDEX.
+
+2.2. By Table Data Storage Method
+
+2.2.1. Clustered Index
+- Principle: The data in the table is physically reordered according to the index key.
+  - A table can have only one CLUSTERED INDEX (this index *is* the table).
+  - The leaf nodes of the B+Tree contain the table records themselves, not pointers to them.
+- Pros:
+  - All the benefits of a B+Tree (point and range search, ORDER BY, GROUP BY) and even a bit faster (no separate lookup needed to read the record).
+  - Takes up less space than a table + a non-clustered index.
+- Cons:
+  - Other (secondary) indexes store not a pointer to the data record (TID), but the primary key of the record, which then requires a separate lookup. This means a double tree lookup: first on the secondary index to find the cluster key, and then on the clustered index to find the record itself. This can be slower than a single lookup on a non-clustered index with a direct pointer (TID).
+  - Slower to update on insert/delete (an index page/block stores the entire record, not just the key, so fewer items fit on a page, resulting in lower fanout and greater tree depth).
+- In different DBMSs:
+  - SQL Server: Tables are created by default with a clustered index on the PRIMARY KEY.
+  - Oracle: Index-Organized Table (IOT) CREATE TABLE ... ORGANIZATION INDEX.
+  - PostgreSQL: No clustered indexes, only a one-time physical sort without automatic re-sorting on record changes: CLUSTER table USING index.
+
+ 2.2.2. Non-Clustered Indexes
+- If there is no clustered index, the leaf nodes store pointers to the table records (TIDs).
+- If there is a clustered index, the leaf nodes store the primary keys instead of pointers.
+- A table can have many non-clustered indexes.
+- Can be faster for lookups and inserts/deletes than a CLUSTERED index (a non-clustered index page/block fits more keys, leading to higher fanout and less tree depth).
+- All indexes in PostgreSQL and Oracle are non-clustered by default.
+
+2.3. By Key Structure
+- Single-column: On a single column.
+- Composite / Multi-column: On multiple columns. The order of columns in such an index is very important.
+- Expression-based / Functional / Computed Column: On expressions/functions/computed columns.
+  - CREATE INDEX idx_lower_email ON users (LOWER(email));
+    - Speeds up WHERE LOWER(email) = 'user@mail.ru' if the expression matches exactly.
+
+2.4. By Uniqueness
+- Unique
+  - CREATE UNIQUE INDEX
+  - Prevents the insertion of duplicate keys by raising an exception or returning an error.
+  - This type of index is what actually enforces PRIMARY KEY and UNIQUE integrity constraints.
+  - The property of unique indexes is the basis for the pattern of declarative validation of complex constraints: define a MATERIALIZED VIEW and a UNIQUE INDEX on it. [SQL Patterns. Vadim Tropashko]
+- Non-unique
+  - Duplicate keys are allowed.
+
+2.5. By Storage of Additional Columns
+- Covering (INCLUDE): The index contains not only the key but also all columns needed to execute the query (from SELECT, WHERE, ORDER BY, GROUP BY).
+  - Why: The DBMS retrieves all necessary data from the index without needing to access the table itself.
+  - SQL Server: CREATE INDEX idx_name ON users (email) INCLUDE (fullname, created_at);
+  - PostgreSQL 11+: CREATE INDEX ... INCLUDE (other_columns);
+- Non-covering
+
+2.6. By Coverage Completeness
+- Full
+  - All records are indexed.
+- Partial / Filtered
+  - Only a subset of records satisfying a specific condition (WHERE) is indexed.
+  - Why:
+    - Saves space and speeds up index maintenance.
+    - Can enforce uniqueness for a subset of keys.
+      - Example: A user can have only one active draft but any number of archived documents. CREATE UNIQUE INDEX ON documents (user_id) WHERE status = 'draft';
+
+2.7. By Sparsity
+- Dense
+  - Stores all values of the indexed column. Each entry in the index points to a specific data row.
+- Sparse
+  - Stores only some values—usually for the first value in each data block. To find a specific record, the DBMS first finds the relevant block in the index and then scans that small block to find the row.
+  - PostgreSQL: BRIN (Block Range Index)
+    - The table is divided into ranges of adjacent disk blocks (e.g., 128 blocks each).
+    - For each such range, the BRIN index stores just one entry: [min_value, max_value].
+    - When you run a query like WHERE timestamp = '2023-10-27 10:00', PostgreSQL looks at the BRIN index. If '2023-10-27 10:00' does not fall within the [min, max] range for a set of blocks, PostgreSQL simply skips all those blocks without reading them from disk.
+
+2.8. Specialized Indexes
+- Full-Text: For efficient searching of words and phrases within text data.
+- Spatial: For queries on geospatial data (points, lines, polygons).
+- XML Indexes: To speed up queries on XML data.
+- JSON Indexes: To speed up queries on JSON documents.
+
+2.8.1. Full-Text
+- Fast text search (LIKE '%word%', relevance).
+- PostgreSQL: GIN (Generalized Inverted Index):
+  - Breaks text into lexemes (words) and builds an inverted index.
+  - CREATE INDEX ON documents USING GIN (to_tsvector('russian', text))
+- SQL Server: A separate service CREATE FULLTEXT INDEX ON articles (content) KEY INDEX pk_id
+
+2.8.2. Spatial
+- For geographic queries: "find everything within a 5 km radius."
+- PostgreSQL: GiST (Generalized Search Tree) with the PostGIS extension.
+  - CREATE INDEX ON places USING GIST (location)
+- Oracle: CREATE INDEX idx_geom ON tables (geom) INDEXTYPE IS MDSYS.SPATIAL_INDEX.
+- SQL Server: CREATE SPATIAL INDEX.
+
+2.8.3. Columnstore Indexes
+- Idea: Store columns separately (like in Vertica, Clickhouse).
+- PostgreSQL: Not available out-of-the-box. There are extensions like cstore_fdw.
+- SQL Server: CREATE COLUMNSTORE INDEX (significantly speeds up aggregations SUM/COUNT/GROUP BY on infrequently updated data).
+- Oracle: CREATE COLUMNAR INDEX (in Exadata).
+
+3. In-depth Details
+
+3.1. B+Tree Indexes
+
+A B+Tree is a balanced tree with pointers to data records only in its leaf nodes (unlike a B-Tree, where pointers can also be in internal nodes).
+
+[b-tree.png]
+In mermaid diagram:
+graph TD
+    A[Root] --> B[Node 1: 10, 20]
+    A --> C[Node 2: 30, 40]
+
+    B --> D[Leaf 1: 5, 7, 8]
+    B --> E[Leaf 2: 10, 15, 18, 20]
+    B --> F[Leaf 3: 25, 27]
+
+    C --> G[Leaf 4: 30, 32]
+    C --> H[Leaf 5: 35, 38]
+    C --> I[Leaf 6: 40, 45, 50]
+
+    classDef leaf fill:#bbf,stroke:#333,stroke-width:2px;
+    class D,E,F,G,H,I leaf;
+
+
+Components:
+- Root. The top-level node (can be the only node if there are few records).
+- Internal Nodes. Store boundary keys (10, 20, 30, 40) and references to child nodes.
+- Leaf Nodes. Contain the actual data (or references to it) in sorted order.
+  - Leaves are linked in a list (a "next leaf" pointer) → convenient for range queries.
+
+Example:
+- Search for 18 → Traverse Root → Node 1 → Leaf 2.
+- Range query 15...27 → Find Leaf 2 (15,18,20), then follow the chain → Leaf 3 (25,27).
+
+Search Algorithm - Traversing the Tree:
+1. Start at the Root.
+2. If the node is not a leaf, find the range between adjacent keys where the search value falls.
+   - A simple option is a binary search.
+   - Optimizations exist, like storing a small array of pointers within the node.
+3. Descend to the found child node.
+4. If the node is a leaf, search for the value within it.
+
+Complexity: O(log N) (where N is the number of elements). For millions of rows, the depth is ≈ 4-5 levels.
+
+Key Insertion Algorithm
+1. Find the target leaf using the search algorithm.
+2. If there is space in the leaf:
+   - Insert the key in sorted order.
+3. If the leaf is full:
+   - Split the leaf into two.
+   - The middle key "promotes" to the parent node.
+   - If the parent also overflows → recursive Split upwards.
+
+Deletion Algorithm
+1. Find the key in a leaf.
+2. Delete it.
+3. If the leaf has too few keys:
+   - Borrow from a sibling:
+     - If a neighboring leaf has a surplus (> MIN_KEYS keys) → redistribute.
+   - Otherwise, Merge:
+     - Combine the two leaves into one.
+     - The key from the parent moves down.
+     - If the parent now has too few keys → recursive Merge.
+
+Complexity: O(log N) (same as insertion/search).
+
+Bulk Loading
+Problem: Inserting 1 million records one by one → a million Splits.
+Solution: Sort the data beforehand + build the tree bottom-up.
+
+1. Sort all the data.
+2. Partition it into future leaf nodes of a fixed size.
+3. Build the parent node level (boundary keys).
+4. Repeat until only one node (the Root) remains.
+
+[btree-bulk-load.png]
+In mermaid diagram:
+graph LR
+    L1[Leaf 1: 1,2,3]
+    L2[Leaf 2: 4,5,6]
+    L3[Leaf 3: 7,8,9]
+    L4[Leaf 4: 10,11,12]
+
+    N1[Node 1: 4] --> L1
+    N1 --> L2
+    N2[Node 2: 10] --> L3
+    N2 --> L4
+
+    Root[Root: 7] --> N1
+    Root --> N2
+
+    classDef leaf fill:#bbf,stroke:#333;
+    class L1,L2,L3,L4 leaf;
+
+
+Pros of Bulk Load:
+- 50-70% faster than item-by-item insertion.
+- Densely packed pages (no half-empty nodes).
+
+PostgreSQL: CREATE INDEX ... WITH (FILLFACTOR=100) helps.
+InnoDB (MySQL): Bulk Load is default for ALTER TABLE ... ADD INDEX.
+
+Skew and Hot Spots
+A Hot Spot occurs when all inserts go to the same page (e.g., an index on created_at TIMESTAMP in real-time).
+
+1.  Monotonically increasing keys (IDs from a SEQUENCE, timestamps):
+    - All inserts go to the rightmost leaf.
+    - Splits always happen on the right → the tree grows unevenly.
+
+2.  UUID chaos (random keys):
+    - Inserts are evenly distributed across leaves.
+    - More Splits (the tree becomes "fluffy").
+
+Solutions:
+- Hash index (if only = is needed).
+- Reverse Key Index (Oracle): Key bytes are reversed (12345 → 54321) → more even distribution.
+- Asynchronous indexing (PostgreSQL CREATE INDEX CONCURRENTLY).
+
+[btree-skew.png]
+In mermaid diagram:
+graph TD
+    Root --> Node1[10, 20]
+    Node1 --> Leaf1[1, 2, 5]
+    Node1 --> Leaf2[10, 15, 18, 20]
+    Node1 --> Leaf3[21,22,23,24,25,26,27,28,29,30]
+
+    style Leaf3 fill:#f99,stroke:#333;
+ 
+Here, Leaf3 is overfull, while the first leaves are half-empty.
+
+B+Tree Summary (all operations are logarithmic to the base of the fanout):
+| Operation | Complexity |
+|---|---|
+| Find | O(log N) |
+| Insert | O(log N) |
+| Delete | O(log N) |
+| Range Scan | O(log N + K) <br> (K is the number of items in the range) |
+
+Pros:
+- Balanced (no depth skew).
+- Efficient for =, >, <, BETWEEN.
+- Linked leaves → fast range queries.
+
+Cons:
+- Inserting/deleting hot keys → contention for pages in the buffer cache.
+- Highly random (UUID) keys → many Splits.
+
+3.2. Hash Indexes
+
+Hash indexes store a 32-bit hash code derived from the value of the indexed column. Consequently, such indexes can only handle simple equality comparisons. The query planner will consider using a hash index whenever an indexed column is involved in a comparison using the equality operator (=).
+
+Hash indexes are particularly effective for exact matches in large datasets but have limited applicability due to their inability to handle range queries or partial match queries.
+
+Internal Structure of a Hash Index
+
+A hash index is organized as a hash table with buckets, where:
+- The column value is hashed to determine the bucket.
+- Each bucket contains pointers to data rows with the same hash value.
+- Collisions are resolved using linked lists.
+
+This structure provides constant-time search complexity O(1) in the ideal case but can degrade with a large number of collisions.
+
+Hash indexes are one of the simplest and fastest types of indexes, but with strict limitations. Let's explore how they work, where they are effective, and where they are useless.
+
+The Core Idea of a Hash Index
+
+Imagine a large array of "buckets." Each bucket stores references to table rows.
+
+How it works:
+1. Take the key value (e.g., user_id = 12345).
+2. Apply a hash function → get a bucket number (an integer 0 ≤ N ≤ BUCKET_COUNT-1).
+3. This bucket contains a list of references (ROWID, TID, pointers) to all rows with hash(12345).
+4. When searching WHERE user_id = 12345:
+   - Calculate hash(12345) → find the bucket → scan only that bucket.
+
+[hash-insert.png]
+In mermaid diagram:
+graph LR
+    subgraph HashTable[Hash Table]
+        B0[Bucket 0]
+        B1[Bucket 1]
+        B2[Bucket 2]
+        B3[Bucket 3]
+        B4[Bucket 4]
+    end
+
+    H[Hash Function]
+    K[Key = 12345]
+    ROWID1[ROWID: 100]
+    ROWID2[ROWID: 5000]
+    ROWID3[ROWID: 9999]
+
+    K --> H
+    H -->|Index = 2| B2
+    B2 --> ROWID1
+    B2 --> ROWID2
+    B2 --> ROWID3
+
+Three key components:
+1.  Hash Table (Bucket Array) — an array of pointers to buckets.
+2.  Buckets — lists of pointers to records (TIDs).
+3.  Overflow Pages — pages for handling bucket overflows.
+
+How it's stored on disk (PostgreSQL hash index):
+- Page metadata (type "hash").
+- Bucket Number.
+- Bitmaps of free space (for fast memory allocation).
+- Pointers to overflow chains (if a bucket has too many items).
+
+[hash-index-page.png]
+In mermaid diagram:
+graph TD
+    subgraph BucketPage[Bucket Page #5]
+        Header[Metadata]
+        Items[List of TIDs:<br/>100, 2050, 3333]
+        Overflow[→ Next Overflow Page]
+    end
+
+    subgraph OverflowPage
+        MoreItems[TIDs: 7777, 9999]
+        NextOverflow[→ NULL end of chain]
+    end
+
+    BucketPage -->|If Items is full| OverflowPage
+
+
+Search Algorithm:
+1. hash(key) → bucket_number.
+2. Read the bucket page for that number.
+3. In the bucket, perform a linear search among the TIDs.
+   - If the bucket doesn't fit in memory → read Overflow Pages.
+4. Retrieve the rows from the main table using the TIDs.
+
+Complexity: O(1) (if no collisions) → ideal for =.
+
+Collisions and Overflow Pages
+
+A collision occurs when hash(12345) = hash(67890) but 12345 ≠ 67890.
+
+What happens:
+- Both TIDs go into the same bucket.
+- If the bucket overflows (e.g., 32 items → the 33rd doesn't fit):
+  1. A new page is allocated (Overflow Page).
+  2. The old bucket points to it: → Next Overflow.
+  3. The new page continues to store TIDs.
+
+[hash-collision.png]
+In mermaid diagram: 
+graph LR
+    B5[Bucket 5: 100, 200, 300<br/>... 1024, → Overflow]
+    OF1[Overflow Page 1: 2048, 3072]
+    OF2[Overflow Page 2: 4096]
+
+    B5 --> OF1
+    OF1 --> OF2
+    OF2 --> NULL
+
+The more collisions:
+- The longer it takes to scan the linked list.
+- The index "degrades" to O(N) (like a full scan).
+
+Insert:
+1. hash(key) → bucket number.
+2. Read the bucket page.
+3. Add the TID to the list (or to an overflow page if full).
+4. If the bucket is filled → Split (see below).
+
+Delete:
+1. Find the bucket.
+2. Remove the TID from the list (or from the overflow chain).
+3. If the bucket becomes nearly empty → it can be merged with a neighbor (rare).
+
+Split (dividing a bucket):
+- Occurs when the average number of items per bucket (fill factor) exceeds a threshold (e.g., 80%).
+- Double the number of buckets (1024 → 2048).
+- Re-hash some of the keys into the new buckets.
+
+Example (PostgreSQL pg_hash_index):
+- fillfactor = 75 (default).
+- If there's an average of 3.5 collisions per bucket → it's time to expand the table.
+
+Pros of Hash Indexes:
+1. Instantaneous lookups with = (better than B-Tree).
+2. More compact than B-Tree (no intermediate nodes).
+3. Easy to implement.
+
+Cons (critically important):
+1. No support for ranges (<, >, BETWEEN).
+2. Not resilient to collisions (worst case is O(N)).
+3. Does not work with LIKE or partial keys (only strict equality).
+4. Unordered (no ORDER BY optimization).
+5. Does not handle frequent Splits well (expensive as the table grows).
+
+Implementation in DBMSs:
+- PostgreSQL: CREATE INDEX ... USING HASH (useful, but less common than B-Tree).
+- MySQL (InnoDB): Hash indexes are only adaptive (in-memory, not on disk).
+- SQL Server: No pure Hash indexes (but Columnstore has a similar principle).
+- Oracle: Has HASH CLUSTER (table is stored as a hash table).
+
+Conclusion:
+- A Hash index is super-fast for equality search (if there are no massive collisions).
+- Not suitable for ranges, LIKE, or ORDER BY.
+- Table growth → periodic Splits (increased cost).
+- Use it when you are 100% sure you only need an EQUALITY SCAN.
+
+3.3. GiST Indexes
+
+GiST (Generalized Search Tree) indexes are not a single, specific type of index but rather an infrastructure within which various indexing strategies can be implemented. Consequently, the specific operators that can be used with a GiST index vary depending on the indexing strategy (the operator class).
+
+GiST generalizes the ideas of balanced trees (B-Tree, R-Tree) and allows building indexes for:
+- Geospatial data (nearest neighbor search, search within a radius, intersection of areas).
+- Full-text search.
+- Ranges (date intervals, numeric intervals).
+- Vector similarity (cosine distance, fuzzy search).
+
+As an example, vanilla PostgreSQL includes GiST operator classes for several two-dimensional geometric data types, which support indexed queries using operators like:
+
+<<   &<   &>   >>   <<|   &<|   |&>   |>>   @>   <@   ~=   &&
+
+
+GiST indexes are also capable of "nearest-neighbor" searches. Here is an example query that finds the ten places closest to a given point:
+sql
+SELECT * FROM places ORDER BY location <-> point '(101,456)' LIMIT 10;
+
+
+GiST is a balanced tree (like B-Tree) but with two key differences:
+- Arbitrary comparison logic (not just =, <, >).
+- Extensibility (you can plug in new data types and operations).
+
+Core Components of GiST:
+1.  Keys (entries) in the tree nodes are not just numbers, but objects (representations).
+2.  Predicate is a function that checks if an "element belongs to a set."
+3.  Penalty is how "expensive" it is to add a new key to a node.
+4.  Union is how to aggregate keys during a Split.
+5.  PickSplit is the strategy for splitting an overfull node.
+
+[gist-structure.png]
+
+How Search Works:
+1. In each node, check the predicate (e.g., "does the query rectangle intersect with the key's bbox?").
+2. If TRUE, descend into the subtree.
+3. In leaf nodes, perform a direct comparison (check for an exact match).
+
+Example of GiST for 2D points (R-Tree):
+- Key = Bounding Box (bbox).
+- Predicate: "is point (x,y) inside the bbox?".
+- Penalty: how much the bbox area increases if a new point is added.
+- Union: builds the minimum bbox that encloses all children.
+
+PostgreSQL provides several out-of-the-box GiST indexes for different tasks:
+| Index Type | What it indexes | Example Query |
+|---|---|---|
+| btree_gist | Numbers, dates, strings (like B-Tree, but GiST) | WHERE id BETWEEN 10 AND 100 |
+| gist__int | int4 arrays (intersection, contains) | WHERE ARRAY[1,2] <@ indexed_array |
+| pg_trgm | Text (fuzzy matching, LIKE '%abc%') | WHERE name LIKE '%Moscow%' |
+| PostGIS (geometry gist) | Geo-objects (points, polygons) | WHERE ST_DWithin(point, 'POINT(30 50)', 1000) |
+| tsgist | Full-text search (documents, tsvector) | WHERE to_tsvector(text) @@ 'query'::tsquery |
+| range_gist | Ranges (int4range, daterange) | WHERE daterange @> '2023-01-01'::date |
+
+Creating a GiST index on geospatial data (PostGIS):
+CREATE TABLE places (id SERIAL, geom geometry(POINT,4326));
+CREATE INDEX idx_places_geom ON places USING GIST (geom);
+
+SELECT * FROM places
+WHERE ST_DWithin(geom, ST_MakePoint(30.3, 59.9), 0.1);  -- 0.1 degrees ≈ 10 km
+
+
+| Characteristic | B-Tree | R-Tree (GiST special case) | GiST (general case) |
+|---|---|---|---|
+| Data Type | Scalars (numbers, strings) | Multi-dimensional (geo, rectangles) | Any (custom) |
+| Comparison | Strict =, <, > | Bounding box intersection | User-defined |
+| Extensibility | No (rigid structure) | Medium (R-Tree logic) | Full (any logic) |
+| Examples | id = 123, age > 18 | bbox contains point, geo-queries | vector is similar to another, array intersects |
+
+| Task | How GiST adapts | Implementation in PG |
+|---|---|---|
+| Geo-search | R-Tree logic (bbox union) | geometry_gist (PostGIS) |
+| Full-text | Signature trees (similar to inverted index) | tsgist (built-in) |
+| Arrays | Set intersection/inclusion | gist__int (extension) |
+| Fuzzy text | Trigrams (Levenshtein distance) | pg_trgm |
+| Ranges | Check @> (contains) between intervals | range_gist |
+
+When to Choose GiST (over B-Tree/Hash)
+| If you need | GiST | B-Tree | Hash |
+|---|---|---|---|
+| id = 123 | Can work | Better | Better |
+| age BETWEEN 18 AND 30 | No | Better | Poor |
+| point near (30,50) | Best | Poor | Poor |
+| ARRAY[1,2] && ARRAY[2,3] | Best | No | No |
+| text % 'fuzzy query' | Best | No | No |
+| Custom search logic | Best | No | No |
+
+- GiST is not just an index, but a framework for building extensible trees.
+- PostgreSQL is the only DBMS where GiST is officially part of the core.
+- Oracle/SQL Server/MySQL implement special cases (like R-Tree for geo).
+- If you need non-trivial search logic, GiST is your choice.
+
+3.4. SP-GiST Indexes
+
+SP-GiST (Space-Partitioned Generalized Search Tree) indexes, like GiST indexes, offer an infrastructure that supports various kinds of searches. SP-GiST allows the implementation of a wide range of different non-balanced, disk-based data structures, such as quad-trees, k-d trees, and radix trees (prefix trees).
+
+As an example, the standard PostgreSQL distribution includes SP-GiST operator classes for two-dimensional points, which support indexed queries using operators like:
+
+<<   >>   ~=   <@   <<|   |>>
+
+
+Like GiST, SP-GiST also supports "nearest-neighbor" searches.
+
+3.5. GIN Indexes
+
+GIN (Generalized Inverted Index) is another universal index engine in PostgreSQL (along with GiST). If GiST is a "flexible tree" for multi-dimensional and custom data, GIN is the tool for full-text search, arrays, JSON, and fuzzy matching.
+- Data is broken down into tokens (words, phrases, array elements, or JSON document parts, n-grams).
+- Inverted Index: "token → list of documents (row ID, TID)".
+
+[gin-structure.png]
+graph TD
+    subgraph Lexemes[Token Dictionary]
+        token1[cat]
+        token2[dog]
+        token3[meows]
+    end
+
+    subgraph PostingLists[Inverted Lists]
+        token1 --> TID1[100]
+        token1 --> TID2[200]
+        token2 --> TID3[300]
+        token3 --> TID1[100]
+        token3 --> TID4[400]
+    end
+
+How GIN works:
+1. A parser breaks the data into tokens.
+2. Each token gets a posting list (a list of RowIDs where it appears).
+3. When searching WHERE text @@ 'dog':
+   - Look up the token "dog".
+   - Quickly retrieve all RowIDs from its posting list.
+   - Read the actual rows from the table.
+
+Example of GIN for full-text search:
+CREATE TABLE documents (id SERIAL, text TEXT);
+CREATE INDEX idx_docs_text ON documents USING GIN (to_tsvector('russian', text));
+
+SELECT * FROM documents
+WHERE to_tsvector('russian', text) @@ to_tsquery('russian', 'dog & cat');
+
+GIN consists of two main structures:
+- A B-Tree over keys (the token dictionary).
+- Posting lists (TID-lists for each token).
+
+When GIN is compact:
+- If tokens are frequently repeated (e.g., article tags: "SQL", "Python").
+- Many identical elements in arrays (e.g., integer[]).
+
+When GIN bloats:
+- Unique long strings (UUIDs, random hashes).
+- Very large posting lists (e.g., the word "and" appears in 90% of texts).
+
+Trigram Index (pg_trgm)
+A trigram is a sequence of three consecutive characters in a word:
+- "cat" → {"  c", " ca", "cat", "at "}
+- "database" → {"  d", " da", "dat", "ata", ... "se "}
+
+The idea of pg_trgm:
+1. Break any text into trigrams.
+2. Build a GIN index on these trigrams.
+3. A LIKE '%word%' search → finds the intersection of the query's trigrams and the text's trigrams.
+
+Example:
+CREATE EXTENSION pg_trgm;
+CREATE TABLE names (id SERIAL, name TEXT);
+CREATE INDEX idx_names_trgm ON names USING GIN (name gin_trgm_ops);
+
+SELECT * FROM names
+WHERE name LIKE '%Michael%';
+-- Searches for trigrams: {" Mi", "Mic", "ich", ... "el "}
+
+How pg_trgm speeds up fuzzy search:
+- ILIKE '%abc%' (without a leading anchor).
+- SIMILARITY(name, 'John') > 0.5 (similar names).
+- % operator (a special fuzzy comparison).
+
+GIN Analogues in Other DBMSs
+While the term GIN is specific to PostgreSQL, the concept of an Inverted Index is implemented everywhere:
+
+MySQL: FULLTEXT INDEX
+- InnoDB (since MySQL 5.6+) supports full-text indexing.
+- Natural Language Mode (default).
+- Boolean Mode (+dog -cat).
+CREATE TABLE articles (id INT, text TEXT, FULLTEXT(text));
+SELECT * FROM articles WHERE MATCH(text) AGAINST('+dog -cat' IN BOOLEAN MODE);
+
+SQL Server: FULL-TEXT INDEX
+- A separate Full-Text Search service.
+- Supports morphology (word stemming).
+CREATE FULLTEXT INDEX ON articles (text) KEY INDEX pk_id;
+SELECT * FROM articles WHERE CONTAINS(text, '"dog" AND NOT "cat"');
+
+Oracle: Oracle Text (CONTEXT Index)
+- CONTEXT (for full-text).
+- CTXCAT (for categorized search).
+CREATE INDEX idx_text ON documents (text) INDEXTYPE IS CTXSYS.CONTEXT;
+SELECT * FROM documents WHERE CONTAINS(text, 'dog AND NOT cat') > 0;
+
+Elasticsearch/OpenSearch
+This is a dedicated search engine built around the Inverted Index:
+- Mapping (analogous to CREATE INDEX).
+- Inverted Index is the default for all text fields.
+json
+{
+  "mappings": {
+    "properties": {
+      "text": {"type": "text"}
+    }
+  }
+}
+// Search
+GET /index/_search
+{
+  "query": {
+    "match": {
+      "text": "dog cat"
+    }
+  }
+}
+
+
+Comparison: GIN vs. GiST vs. B-Tree vs. Hash
+| Index | Task | Example Query | DBMS |
+|---|---|---|---|
+| GIN | Full-text, arrays, trigrams | text @@ 'query', ARRAY[1] <@ arr | PG |
+| GiST | Geospatial, ranges, R-Tree | point <@ bbox, daterange @> date | PG |
+| B-Tree | Scalar =, >, < | id = 123, age BETWEEN 18 AND 30 | All |
+| Hash | Only = (hash table) | email = 'test@mail.ru' | PG, MySQL |
+
+When to choose GIN:
+1. Full-text search (@@ tsquery).
+2. Arrays and JSONB (@>, <@, &&).
+3. Trigrams (LIKE '%abc%', similarity).
+4. Frequently repeated tokens (tags, categories).
+
+When GiST is better than GIN:
+1. Geospatial data (PostGIS).
+2. Ranges (int4range, daterange).
+3. Fuzzy search on numbers (btree_gist).
+
+GIN vs. Elasticsearch
+| Characteristic | PostgreSQL GIN | Elasticsearch |
+|---|---|---|
+| Query Language | SQL (@@, <@) | JSON DSL (match, bool) |
+| Sharding | No (PG 12+ has some partitioning) | Native (shards, replicas) |
+| Workload (Write/Read) | Better for OLTP (transactions) | Better for analytics (large volumes) |
+| Trigrams/LIKE | Built-in (pg_trgm) | More complex (nGram tokenization) |
+| ACID | Fully ACID | Eventual Consistency (near real-time) |
+
+Conclusion:
+- GIN is the best choice in PostgreSQL for full-text, arrays, and fuzzy search.
+- pg_trgm on top of GIN provides LIKE '%word%' performance comparable to Elasticsearch.
+- If data is < 100 GB and ACID is important, PostgreSQL+GIN is more than sufficient.
+- If you need a cluster and real-time analytics, Elasticsearch/OpenSearch are unparalleled.
+
+3.6. BRIN Indexes
+
+BRIN (Block Range INdex) indexes store summary information about the values stored in consecutive physical block ranges of a table. Thus, they are most effective for columns whose values correlate well with the physical order of the table's rows.
+
+BRIN indexes are particularly useful for very large tables where data is naturally ordered (e.g., time-series data), as they occupy much less space than traditional indexes and can provide significant speedups when applied correctly.
+
+BRIN is one of the most space-efficient and intelligent indexes in PostgreSQL, designed for very large tables (terabytes of data). While a B-Tree can take up a lot of space and GIN/GiST require careful tuning, BRIN is a "minimalist index" that consumes little memory and disk space but still allows skipping obviously unnecessary data during a scan.
+
+Example: A 1-terabyte table with event logs:
+CREATE TABLE logs (
+    id BIGINT PRIMARY KEY,
+    event_time TIMESTAMP,
+    message TEXT
+);
+
+- Data is inserted chronologically (event_time increases).
+- Frequent queries: WHERE event_time BETWEEN '2025-01-01' AND '2025-01-07'.
+
+Why index every id (B-Tree) when you can just know the disk page ranges where data from 2025-01-01 to 2025-01-07 lies?
+
+BRIN:
+- Divides the table into Block Ranges of 128 pages each (by default).
+- For each range, it remembers the minimum and maximum index values (e.g., min(event_time), max(event_time)).
+- On a query like WHERE event_time > '2023-02-01', it immediately prunes blocks where max(event_time) < '2023-02-01'.
+
+[BRIN-structure.png]
+graph LR
+    subgraph BlockRange1[Blocks 1-128]
+        min_time[2023-01-01]
+        max_time[2023-01-10]
+    end
+
+    subgraph BlockRange2[Blocks 129-256]
+        min_time[2023-01-11]
+        max_time[2023-01-20]
+    end
+
+    subgraph BlockRange3[Blocks 257-384]
+        min_time[2023-01-21]
+        max_time[2023-01-31]
+    end
+
+    BRIN_Index[BRIN Index] --> BlockRange1
+    BRIN_Index --> BlockRange2
+    BRIN_Index --> BlockRange3
+
+How much space does BRIN take?
+- A 1 TB table (100 million pages).
+- BRIN with pages_per_range = 128 → 781k entries (100M / 128).
+- Each BRIN entry: 24 bytes (min + max + metadata).
+- Total: 18 MB for the entire index!
+
+For comparison:
+- A B-Tree on event_time would take ~10-20 GB (a thousand times more!).
+
+A BRIN page consists of:
+1.  Header (index type, version).
+2.  An array of ranges (ItemArray):
+    - min_value (e.g., 2023-01-01).
+    - max_value (e.g., 2023-01-10).
+    - allnulls (if the entire range is NULLs).
+    - hasnulls (if there is at least one NULL).
+
+How scanning works:
+1. Read the BRIN root (meta-page).
+2. For each block range:
+   - Check the condition (event_time > '2023-02-01').
+   - If it doesn't overlap (max < '2023-02-01') → skip the entire range.
+   - Otherwise, read the blocks themselves (a Heap Scan within the range).
+
+EXPLAIN (ANALYZE) SELECT * FROM logs WHERE event_time > '2023-02-01';
+Bitmap Heap Scan on logs  (cost=12.50..1500 rows=1000)
+  Recheck Cond: (event_time > '2023-02-01'::date)
+  ->  Bitmap Index Scan on brin_logs_event_time  (cost=4.50..12.50 rows=1000)
+        Index Cond: (event_time > '2023-02-01'::date)
+
+You can see that the Bitmap Index Scan (BRIN) prunes unnecessary blocks, and then the Bitmap Heap Scan reads only the required ones.
+
+BRIN Analogues in Other DBMSs
+
+While the term BRIN is unique to PostgreSQL, the idea of a "coarse-grained range index" is implemented in:
+
+Oracle: Zone Maps (Exadata)
+- The Exadata Storage Server stores MIN/MAX for data cells.
+- The analog of pages_per_range is the storage cell size (usually 1-4 MB).
+
+SQL Server: Columnstore Index (CSI)
+- Stores data column-wise + Row Group Metadata (min/max for each chunk).
+- A Row Group ≈ a BRIN Block Range (1 million rows).
+
+Comparison: BRIN vs. B-Tree vs. Partitioning
+
+| Characteristic | BRIN | B-Tree | Partitioning |
+|---|---|---|---|
+| Index Size | Very small (tens of MB) | Large (10-50% of table) | Almost 0 (metadata) |
+| Insert Speed | High (almost like no index) | Low (tree balancing) | High (add a partition) |
+| Search Speed | Medium (prunes blocks) | High (O(log N)) | High (if query is on partition key) |
+| Best For | Chronological logs, IoT | OLTP queries, unique keys | Archives, large analytical tables |
+
+When to choose BRIN:
+1. Huge (>100 GB) tables with natural ordering (time, ID).
+2. Queries always filter on a range (dates, numbers).
+3. You need very fast inserts (logs, monitoring).
+
+When BRIN is bad:
+1. Random (UUID) keys (no natural order).
+2. Frequently updated data (BRIN updates are slower).
+3. Point queries.
+
+Conclusion:
+- BRIN is ideal for Append-only data (logs, time-series).
+- Slower for lookups than B-Tree, but hundreds of times smaller.
+- Partitioning gives better performance but is harder to maintain.
+- If your data is naturally ordered, BRIN is your choice!
+
+4. Recommendations for Choosing Indexes
+
+Choosing the right index type depends on several factors:
+
+1.  Data type of the indexed column.
+2.  Types of queries to be executed (equality, range, full-text search, etc.).
+3.  Frequency of data updates.
+4.  Table size and available memory.
+
+Indexes should be created in the following situations:
+
+1.  For columns in WHERE clauses and join conditions - these are the primary candidates for indexing. The query planner considers using an index whenever an indexed column is involved in a comparison (<, <=, =, >=, >).
+2.  For columns in ORDER BY - a query can use a B+Tree index instead of performing a sort.
+3.  For columns in GROUP BY - similar to ORDER BY, indexing columns used in GROUP BY can speed up grouping.
+4.  For deduplication (DISTINCT) - similar to ORDER BY.
+5.  For enforcing uniqueness - unique indexes not only speed up lookups but also ensure data integrity by preventing duplicate values.
+
+Indexes can degrade performance in these cases:
+
+1.  Small tables with few rows (up to a few thousand): it's faster to read a few data blocks than to access an index.
+2.  Columns with low selectivity (few unique values, e.g., a gender column): the index will return pointers to half the table's records, and all of them will need to be read individually. In such cases, the query planner often prefers a full table scan, which is performed with efficient large-block reads.
+3.  Frequent bulk updates: every change to an indexed column requires an index update.
+4.  Columns that are rarely used in queries: the index provides little benefit, but every record change must be reflected in the index, and it also takes up space.
+
+Index Maintenance
+
+Regular index maintenance is necessary to maintain their effectiveness:
+
+1.  VACUUM - to remove "dead" tuples from indexes. In most cases, automatic runs are sufficient, but a manual VACUUM may be needed after massive changes.
+2.  ANALYZE - to update the statistics used by the query planner. This is especially important after significant data changes.
+3.  REINDEX - to eliminate fragmentation, especially for tables with frequent updates.
+
+Monitoring and Analyzing Indexes
+
+Regular monitoring and analysis of index usage will help identify problems and opportunities for optimization:
+
+1.  EXPLAIN and EXPLAIN ANALYZE - to analyze query execution plans and identify inefficient scans.
+2.  pg_stat_user_indexes - shows statistics on index usage, helping to identify unused indexes.
+3.  pg_stat_user_tables - shows statistics on table scans, helping to identify tables that might benefit from additional indexes.
+
