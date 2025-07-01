@@ -1,0 +1,167 @@
+Midterm A Solution
+
+Task 1 [4 points] Database Design
+
+CREATE TABLE Users (
+    user_id SERIAL PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE Channels (
+    channel_id SERIAL PRIMARY KEY,
+    channel_name VARCHAR(100) NOT NULL UNIQUE,
+    admin_id INT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (admin_id) REFERENCES Users(user_id) ON DELETE RESTRICT
+);
+
+-- Table for all Messages (Private, Channel, and Forwarded)
+CREATE TABLE Messages (
+    message_id SERIAL PRIMARY KEY,
+    sender_id INT NOT NULL,
+    content TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    recipient_user_id INT NULL,
+    recipient_channel_id INT NULL,
+    forwarded_from_message_id INT NULL,
+    
+    FOREIGN KEY (sender_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (recipient_user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (recipient_channel_id) REFERENCES Channels(channel_id) ON DELETE CASCADE,
+    FOREIGN KEY (forwarded_from_message_id) REFERENCES Messages(message_id) ON DELETE SET NULL,
+    
+    CONSTRAINT chk_recipient CHECK (
+        (recipient_user_id IS NOT NULL AND recipient_channel_id IS NULL) OR
+        (recipient_user_id IS NULL AND recipient_channel_id IS NOT NULL)
+    )
+);
+
+CREATE TABLE Files (
+    file_id SERIAL PRIMARY KEY,
+    file_name VARCHAR(255) NOT NULL,
+    file_type VARCHAR(50),
+    file_size_bytes BIGINT,
+    storage_path VARCHAR(255) NOT NULL UNIQUE,
+    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE Message_Attachments (
+    message_id INT NOT NULL,
+    file_id INT NOT NULL,
+    PRIMARY KEY (message_id, file_id),
+    FOREIGN KEY (message_id) REFERENCES Messages(message_id) ON DELETE CASCADE,
+    FOREIGN KEY (file_id) REFERENCES Files(file_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Reactions (
+    reaction_id SERIAL PRIMARY KEY,
+    message_id INT NOT NULL,
+    user_id INT NOT NULL,
+    emoji_char VARCHAR(10) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (message_id) REFERENCES Messages(message_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    UNIQUE (message_id, user_id, emoji_char)
+);
+
+Task 2 [2 points] SQL Query
+
+WITH TargetUser AS (
+    SELECT user_id FROM Users WHERE username = 'ABC'
+)
+SELECT
+    (SELECT COUNT(DISTINCT m.message_id)
+     FROM Messages m
+     JOIN Message_Attachments ma ON m.message_id = ma.message_id
+     WHERE m.sender_id = (SELECT user_id FROM TargetUser)
+       AND m.recipient_user_id IS NOT NULL
+       AND m.created_at >= '2024-06-01' AND m.created_at < '2024-07-01'
+    ) AS sent_messages_with_files,
+
+    (SELECT COUNT(DISTINCT m.message_id)
+     FROM Messages m
+     JOIN Message_Attachments ma ON m.message_id = ma.message_id
+     WHERE m.recipient_user_id = (SELECT user_id FROM TargetUser)
+       AND m.created_at >= '2024-06-01' AND m.created_at < '2024-07-01'
+    ) AS received_messages_with_files,
+
+    (SELECT COUNT(DISTINCT m.message_id)
+     FROM Messages m
+     JOIN Message_Attachments ma ON m.message_id = ma.message_id
+     WHERE m.sender_id = (SELECT user_id FROM TargetUser)
+       AND m.forwarded_from_message_id IS NOT NULL
+       AND m.recipient_user_id IS NOT NULL
+       AND m.created_at >= '2024-06-01' AND m.created_at < '2024-07-01'
+    ) AS forwarded_messages_with_files;
+
+Task 3 [2 points] SQL Query
+
+WITH ChannelsWithManyEmojis AS (
+    SELECT 
+        m.recipient_channel_id
+    FROM 
+        Messages m
+    JOIN 
+        Reactions r ON m.message_id = r.message_id
+    WHERE 
+        m.recipient_channel_id IS NOT NULL
+    GROUP BY 
+        m.recipient_channel_id
+    HAVING 
+        COUNT(r.reaction_id) > 5
+)
+SELECT DISTINCT
+    s.user_id
+FROM 
+    Subscriptions s
+WHERE 
+    s.channel_id IN (SELECT recipient_channel_id FROM ChannelsWithManyEmojis);
+
+Task 4 [2 points] SQL Query
+
+WITH ChannelMessageCounts AS (
+    SELECT
+        recipient_channel_id,
+        COUNT(message_id) AS total_messages
+    FROM
+        Messages
+    WHERE
+        recipient_channel_id IS NOT NULL
+    GROUP BY
+        recipient_channel_id
+    ORDER BY
+        total_messages DESC
+    LIMIT 3
+),
+RankedMessagesByEmoji AS (
+    SELECT
+        m.recipient_channel_id,
+        m.message_id,
+        COUNT(r.reaction_id) AS emoji_count,
+        ROW_NUMBER() OVER(PARTITION BY m.recipient_channel_id ORDER BY COUNT(r.reaction_id) DESC, m.message_id DESC) as rn
+    FROM
+        Messages m
+    LEFT JOIN
+        Reactions r ON m.message_id = r.message_id
+    WHERE
+        m.recipient_channel_id IS NOT NULL
+    GROUP BY
+        m.recipient_channel_id, m.message_id
+)
+SELECT
+    c.channel_name,
+    cmc.total_messages,
+    rme.message_id AS message_with_max_emojis,
+    rme.emoji_count AS max_emoji_count
+FROM
+    ChannelMessageCounts cmc
+JOIN
+    Channels c ON cmc.recipient_channel_id = c.channel_id
+JOIN
+    RankedMessagesByEmoji rme ON cmc.recipient_channel_id = rme.recipient_channel_id
+WHERE
+    rme.rn = 1
+ORDER BY
+    cmc.total_messages DESC;

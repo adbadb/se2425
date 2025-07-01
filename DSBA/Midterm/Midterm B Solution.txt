@@ -1,0 +1,155 @@
+Midterm B Solution 
+
+Task 1 [4 points] Database Design
+
+CREATE TABLE Users (
+    user_id SERIAL PRIMARY KEY,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    monthly_budget DECIMAL(10, 2) NOT NULL,
+    currency VARCHAR(3) NOT NULL,
+    is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE Categories (
+    category_id SERIAL PRIMARY KEY,
+    category_name VARCHAR(100) NOT NULL UNIQUE
+);
+
+CREATE TABLE Groups (
+    group_id SERIAL PRIMARY KEY,
+    group_name VARCHAR(100) NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE Group_Members (
+    user_id INT NOT NULL,
+    group_id INT NOT NULL,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, group_id),
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES Groups(group_id) ON DELETE CASCADE
+);
+
+-- Table for all financial Transactions (Income and Expense)
+CREATE TABLE Transactions (
+    transaction_id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    category_id INT NOT NULL,
+    group_id INT NULL,
+    amount DECIMAL(10, 2) NOT NULL,
+    description TEXT,
+    transaction_date TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    geolocation VARCHAR(255) NULL,
+
+    CHECK (amount <> 0),
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (category_id) REFERENCES Categories(category_id) ON DELETE RESTRICT,
+    FOREIGN KEY (group_id) REFERENCES Groups(group_id) ON DELETE SET NULL
+);
+
+Task 2 [1 point] SQL Query
+
+SELECT 
+    t.transaction_date,
+    t.amount,
+    c.category_name,
+    t.description
+FROM 
+    Transactions t
+JOIN 
+    Users u ON t.user_id = u.user_id
+JOIN 
+    Categories c ON t.category_id = c.category_id
+WHERE 
+    u.email = 'a@b.edu'
+    AND t.amount < 0
+    AND t.transaction_date >= '2024-09-01' 
+    AND t.transaction_date < '2024-10-01'
+ORDER BY 
+    t.transaction_date ASC;
+
+Task 3 [2 points] SQL Query
+
+WITH GroupExpenses AS (
+    SELECT
+        group_id,
+        SUM(ABS(amount)) as total_expense
+    FROM Transactions
+    WHERE
+        group_id IS NOT NULL
+        AND amount < 0
+        AND transaction_date >= '2024-08-01' 
+        AND transaction_date < '2024-09-01'
+    GROUP BY group_id
+),
+OverallAverage AS (
+    SELECT AVG(total_expense) as avg_all_groups_expense
+    FROM GroupExpenses
+)
+SELECT
+    g.group_name,
+    ((ge.total_expense / oa.avg_all_groups_expense) * 100.0) - 100.0 AS excess_percentage
+FROM
+    GroupExpenses ge
+JOIN
+    Groups g ON ge.group_id = g.group_id
+CROSS JOIN
+    OverallAverage oa
+WHERE
+    ge.total_expense > 1.5 * oa.avg_all_groups_expense;
+
+Task 4 [3 points] SQL Query
+
+WITH ValidGroups AS (
+    SELECT group_id
+    FROM Group_Members
+    GROUP BY group_id
+    HAVING COUNT(user_id) >= 3
+),
+GroupAverageSpend AS (
+    SELECT
+        t.group_id,
+        SUM(ABS(t.amount)) / COUNT(DISTINCT gm.user_id) AS avg_per_member_spend
+    FROM Transactions t
+    JOIN Categories c ON t.category_id = c.category_id
+    JOIN Group_Members gm ON t.group_id = gm.group_id
+    WHERE
+        c.category_name = 'Entertainment'
+        AND t.group_id IN (SELECT group_id FROM ValidGroups)
+        AND t.amount < 0
+        -- PostgreSQL syntax for "last month"
+        AND t.transaction_date >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+        AND t.transaction_date <  DATE_TRUNC('month', CURRENT_DATE)
+    GROUP BY t.group_id
+),
+IndividualSpend AS (
+    SELECT
+        t.user_id,
+        SUM(ABS(t.amount)) as individual_entertainment_spend
+    FROM Transactions t
+    JOIN Categories c ON t.category_id = c.category_id
+    WHERE
+        c.category_name = 'Entertainment'
+        AND t.amount < 0
+        -- PostgreSQL syntax for "last month"
+        AND t.transaction_date >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+        AND t.transaction_date <  DATE_TRUNC('month', CURRENT_DATE)
+    GROUP BY t.user_id
+)
+SELECT
+    u.email,
+    g.group_name,
+    (isp.individual_entertainment_spend - gasp.avg_per_member_spend) AS spending_difference
+FROM
+    IndividualSpend isp
+JOIN
+    Group_Members gm ON isp.user_id = gm.user_id
+JOIN
+    GroupAverageSpend gasp ON gm.group_id = gasp.group_id
+JOIN
+    Users u ON isp.user_id = u.user_id
+JOIN
+    Groups g ON gm.group_id = g.group_id
+WHERE
+    isp.individual_entertainment_spend > 1.5 * gasp.avg_per_member_spend;

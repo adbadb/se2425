@@ -1,0 +1,34 @@
+Midterm B
+
+Task 1 [4 points] Database Design
+
+A personal finance management app for students.
+Users register with an email, specify a monthly budget, and a currency.
+Each transaction (income/expense) has a category (e.g., food, study, entertainment), a date, an amount, a description, and an optional geolocation.
+Students can form groups for joint budget management (e.g., for a shared apartment rent).
+The system automatically generates reports:
+- Top 5 spending categories for a given period.
+- A forecast of the remaining budget at the end of the month.
+Administrators can block accounts for suspicious activity (e.g., 10+ transactions per minute).
+Identification and authentication mechanisms are out of scope.
+
+Design a relational database in 3NF (Third Normal Form).
+
+Result: A script with table creation commands (e.g., CREATE TABLE t(a INT PRIMARY KEY);).
+Primary keys must be specified.
+Foreign keys and other constraints (NOT NULL, CHECK, DEFAULT) are optional.
+
+Task 2 [1 point]
+
+Write an SQL query that retrieves all expenses for the user with the email a@b.edu for September 2024. Sort the result by date.
+
+Task 3 [2 points]
+
+Write an SQL query that finds groups where the total expenses for August 2024 exceeded 150% of the average expense across all groups.
+Display the group name and the excess percentage.
+
+Task 4 [3 points]
+
+Write an SQL query that finds students whose spending on "Entertainment" in the last month exceeded 150% of the average for their group.
+Display their email, group name, and the difference between their expenses and the group's average.
+Consider only groups with at least 3 active members.

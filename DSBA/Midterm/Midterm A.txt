@@ -1,0 +1,22 @@
+Midterm A
+
+Task 1 [4 points] Database Design
+
+A messenger. Database need to store information about users, channels, messages and file attachments. It should be possible to send private messages from one user to another, but also to channels (i.e. to all users who have independently subscribed to the channel). Users should be able to forward received and sent private and channel messages to other users and channels. Recipients of messages should be able to respond to them using emojis. Each channel has a single administrator who can send messages to it.
+
+Design a relational database in at least 3NF (Third Normal Form).
+Mandatory: the script for creating tables in SQL DDL (CREATE TABLE).
+Optional, not graded: a conceptual model in the form of an E/R or UML diagram.
+
+Task 2 [2 points] 
+
+Write an SQL query to the database designed in task 1 that returns the number of personal messages with files sent, received and forwarded by the user ABC over June of 2024 . Result: three numbers.
+
+Task 3 [2 points] 
+
+Write an SQL query to the database designed in task 1, returning all users who have at least one channel in their messages to which they subscribe, the number of emoji uses exceeds 5. Result: a list of user IDs.
+
+Task 4 [2 points] 
+
+Write an SQL query to the database designed in task 1, returning a list of (no more than) 3 most active channels by the number of messages sent to them, and for each such channel - one message with the maximum number of emojis.  Result: a list of lines (the name of the channel, the number of messages sent, the ID of the message, the most popular by the number of emojis).
+
