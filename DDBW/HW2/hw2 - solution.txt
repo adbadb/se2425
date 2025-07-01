@@ -1,0 +1,111 @@
+-- Таблица 1: Оптимизирована для поиска измерений по датчику и времени.
+-- Это основная таблица для хранения временных рядов.
+CREATE TABLE sensor_readings_by_time (
+    sensor_id      uuid,         -- Partition Key: все данные одного датчика будут на одном узле.
+    reading_time   timestamp,    -- Clustering Column: данные внутри партиции отсортированы по времени.
+    value          double,
+    unit           text,
+    PRIMARY KEY (sensor_id, reading_time)
+) WITH CLUSTERING ORDER BY (reading_time DESC);
+-- CLUSTERING ORDER DESC позволяет получать последние записи первыми без дополнительной сортировки.
+
+-- Таблица 2: Денормализованная таблица для поиска датчиков по их местоположению.
+-- Это пример "lookup table" (справочной таблицы).
+CREATE TABLE sensors_by_location (
+    country        text,         -- Partition Key (часть 1): для поиска по стране.
+    city           text,         -- Partition Key (часть 2): для поиска по городу внутри страны.
+    sensor_id      uuid,         -- Clustering Column: чтобы сделать PRIMARY KEY уникальным.
+    sensor_type    text,         -- Статическая информация о датчике.
+    PRIMARY KEY ((country, city), sensor_id)
+);
+-- Композитный Partition Key позволяет эффективно выполнять запрос WHERE country = '...' AND city = '...'.
+
+-- Таблица 3: Денормализованная таблица, материализованное представление для specific-query.
+-- Оптимизирована для поиска датчиков с аномально высокими показаниями.
+CREATE TABLE high_co2_readings_by_date (
+    alert_date     date,         -- Partition Key: группируем алерты по дням, чтобы избежать "горячих" партиций.
+    reading_time   timestamp,    -- Clustering Column (часть 1): для сортировки по времени.
+    sensor_id      uuid,         -- Clustering Column (часть 2): для уникальности ключа.
+    value          double,
+    city           text,         -- Доп. информация для контекста.
+    PRIMARY KEY (alert_date, reading_time, sensor_id)
+) WITH CLUSTERING ORDER BY (reading_time DESC);
+-- Приложение при записи данных должно решать, является ли уровень CO2 "критическим",
+-- и если да, то делать запись не только в основную таблицу, но и в эту.
+
+Задание 2
+
+-- 1. Найти последние 10 измерений температуры для датчика с sensor_id = 'temp-berlin-17a'.
+-- Запрос к первой таблице. Благодаря CLUSTERING ORDER BY DESC, LIMIT 10 вернет самые свежие данные.
+SELECT * FROM sensor_readings_by_time
+WHERE sensor_id = 'temp-berlin-17a'
+LIMIT 10;
+
+-- 2. Найти все измерения уровня влажности для датчика sensor_id = 'hum-tokyo-03b' за 21 мая 2024 года.
+-- Запрос к первой таблице с фильтрацией по clustering column (reading_time).
+SELECT * FROM sensor_readings_by_time
+WHERE sensor_id = 'hum-tokyo-03b'
+AND reading_time >= '2024-05-21 00:00:00+0000'
+AND reading_time < '2024-05-22 00:00:00+0000';
+
+-- 3. Найти все типы датчиков и их ID, расположенные в городе Paris.
+-- Запрос к lookup-таблице. Предполагаем, что страна нам известна, например, 'France'.
+SELECT sensor_id, sensor_type FROM sensors_by_location
+WHERE country = 'France' AND city = 'Paris';
+
+-- 4. Найти все случаи фиксации критического уровня CO2 за '2024-05-21'.
+-- Запрос к третьей, специально созданной для этого, таблице.
+SELECT sensor_id, value, reading_time, city FROM high_co2_readings_by_date
+WHERE alert_date = '2024-05-21';
+
+Задание 3
+
+-- 1. Найти все измерения температуры, превышающие 35 градусов, для датчика temp-dubai-01c за 2024-07-20.
+-- Мы фильтруем по value, которое не является частью PRIMARY KEY. Cassandra предупредит о возможной неэффективности.
+-- Это приемлемо, так как мы сильно сужаем область поиска с помощью Partition Key (sensor_id) и Clustering Column (reading_time).
+SELECT * FROM sensor_readings_by_time
+WHERE sensor_id = 'temp-dubai-01c'
+AND reading_time >= '2024-07-20 00:00:00+0000'
+AND reading_time < '2024-07-21 00:00:00+0000'
+AND value > 35
+ALLOW FILTERING;
+/*
+  Комментарий: ALLOW FILTERING здесь необходим, потому что value не является частью ключа.
+  Риск производительности минимален, так как сначала Cassandra найдет нужную партицию по sensor_id
+  и отфильтрует строки по reading_time, и только потом применит фильтр по value к этому небольшому набору данных.
+*/
+
+
+-- 2. Получить самый первый замер, когда-либо сделанный датчиком hum-amazon-01a.
+-- Для этого нужно изменить порядок сортировки на ASC (по возрастанию).
+-- Так как наша основная таблица отсортирована по DESC, мы создадим еще одну таблицу с другим порядком.
+-- (Если бы мы не могли менять схему, пришлось бы вычитывать всю партицию на клиенте).
+-- Предположим, у нас есть такая таблица:
+-- CREATE TABLE sensor_readings_by_time_asc (...) WITH CLUSTERING ORDER BY (reading_time ASC);
+-- Тогда запрос будет:
+SELECT * FROM sensor_readings_by_time_asc -- Используем таблицу с нужной сортировкой
+WHERE sensor_id = 'hum-01a'
+LIMIT 1;
+
+
+-- 3. Посчитать количество алертов по высокому уровню CO2, которые произошли в Paris за 2024-05-21.
+-- city не является частью ключа в таблице high_co2_readings_by_date, поэтому требуется ALLOW FILTERING.
+-- Этот запрос потенциально ОЧЕНЬ медленный, так как Cassandra прочитает все алерты за день (alert_date),
+-- чтобы потом отфильтровать их по городу. Это плохой паттерн для продакшена.
+SELECT COUNT(*) FROM high_co2_readings_by_date
+WHERE alert_date = '2024-05-21'
+AND city = 'Paris'
+ALLOW FILTERING;
+/*
+  Комментарий: Этот запрос крайне неэффективен. Cassandra выгрузит все записи за 2024-05-21
+  и будет фильтровать их по полю city. Для улучшения производительности следовало бы
+  включить city в Partition Key, например: PRIMARY KEY ((city, alert_date), ...).
+*/
+
+-- 1. Рассчитать среднюю, минимальную и максимальную температуру для датчика temp-17a за 2024-05-22.
+-- Cassandra поддерживает встроенные функции агрегации, которые эффективно работают в рамках одной партиции.
+SELECT AVG(value), MIN(value), MAX(value)
+FROM sensor_readings_by_time
+WHERE sensor_id = 'temp-17a'
+AND reading_time >= '2024-05-22 00:00:00+0000'
+AND reading_time < '2024-05-23 00:00:00+0000';

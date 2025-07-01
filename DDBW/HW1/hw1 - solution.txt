@@ -1,0 +1,160 @@
+Решение Домашнего Задания: Проектирование Хранилища Данных
+
+Задание 2.1: Методология Инмона (Централизованное хранилище)
+
+Задача: Спроектировать единую реляционную базу данных в 3-й нормальной форме (3НФ), которая служит централизованным хранилищем для всех бизнес-требований.
+
+Проект решения (3НФ):
+
+1. Справочные таблицы
+Ref_LPU_Profiles (id PK, profile_name) — Справочник профилей ЛПУ
+Ref_Doctor_Profiles (id PK, profile_name) — Справочник профилей врачей
+Ref_ICD10 (id PK, code, name) — Международный классификатор болезней
+Ref_KLADR (id PK, region, city, street, house) — Классификатор адресов
+
+2. Таблицы основных сущностей
+LPUs
+    lpu_id (PK)
+    name
+    address_id (FK -> Ref_KLADR)
+    profile_id (FK -> Ref_LPU_Profiles)
+    phone
+Departments
+    department_id (PK)
+    lpu_id (FK -> LPUs)
+    name
+Wards
+    ward_id (PK)
+    department_id (FK -> Departments)
+    ward_number
+    ward_type ('ВИП', 'Стандартная')
+Beds
+    bed_id (PK)
+    ward_id (FK -> Wards)
+    bed_number
+Patients
+    patient_id (PK)
+    fio
+    birth_date
+    ... (другие перс. данные)
+Doctors
+    doctor_id (PK)
+    fio
+    ... (другие перс. данные)
+
+3. Связующие таблицы (для отношений "многие-ко-многим")
+Doctor_Profile_Link
+    doctor_id (PK, FK -> Doctors)
+    profile_id (PK, FK -> Ref_Doctor_Profiles)
+Doctor_Department_Link
+    doctor_id (PK, FK -> Doctors)
+    department_id (PK, FK -> Departments)
+
+4. Таблицы транзакций и событий
+Schedules
+    schedule_id (PK)
+    doctor_id (FK -> Doctors)
+    department_id (FK -> Departments)
+    schedule_date
+Schedule_Slots
+    slot_id (PK)
+    schedule_id (FK -> Schedules)
+    start_time
+    end_time
+    is_booked (boolean)
+Visits
+    visit_id (PK)
+    patient_id (FK -> Patients)
+    slot_id (FK -> Schedule_Slots, может быть NULL, если визит экстренный)
+    doctor_id (FK -> Doctors)
+    department_id (FK -> Departments)
+    visit_datetime
+    diagnosis_id (FK -> Ref_ICD10)
+    is_hospitalization_referred (boolean)
+Hospitalizations
+    hospitalization_id (PK)
+    visit_id (FK -> Visits) — визит, по которому направили
+    patient_id (FK -> Patients)
+    bed_id (FK -> Beds)
+    start_date
+    end_date (может быть NULL, если пациент еще не выписан)
+
+
+Задание 2.2: Методология Кимбалла (Витрины данных)
+
+Задача: Спроектировать три аналитические витрины данных по архитектуре "звезда" для ответа на конкретные аналитические запросы.
+
+Проект решения:
+
+1. Общие таблицы измерений (Dimensions)
+Эти измерения будут использоваться во всех витринах.
+
+Dim_Date (Date_SK PK, Date, Day, Week, Month, Quarter, Year)
+Dim_Patient (Patient_SK PK, Patient_SourceID, FIO, BirthDate)
+Dim_Doctor (Doctor_SK PK, Doctor_SourceID, FIO)
+Dim_Doctor_Profile (Profile_SK PK, Profile_Name)
+Dim_LPU (LPU_SK PK, LPU_Name, Address, Phone, LPU_Profile_Name)
+Dim_Bed
+    Bed_SK (PK)
+    Bed_Number, Ward_Number, Ward_Type ('ВИП' / 'Стандартная'), Department_Name
+    LPU_SK (FK -> Dim_LPU) — денормализовано для удобства фильтрации
+
+2. Проекты витрин данных ("Звезды")
+
+Витрина 1: "Свободные койки"
+Задача: Статус по загруженности койко-мест на "вчера".
+Таблица фактов: Fact_Bed_Status_Snapshot (Снепшот состояния коечного фонда)
+    Date_SK (FK -> Dim_Date)
+    Bed_SK (FK -> Dim_Bed)
+    Is_Occupied (мера, 1 или 0)
+    Patient_SK (FK -> Dim_Patient, NULL если свободно)
+Логика для дашборда: Запрос агрегирует Is_Occupied по состоянию на Date_SK = "вчера", с возможностью фильтрации по Dim_Bed.Ward_Type и Dim_LPU.LPU_Name (через Dim_Bed).
+
+Витрина 2: "Расписание врачей"
+Задача: Доступные слоты для записи на текущий месяц.
+Таблица фактов: Fact_Schedule_Slots
+    Date_SK (FK -> Dim_Date)
+    Doctor_SK (FK -> Dim_Doctor)
+    LPU_SK (FK -> Dim_LPU)
+    Slot_Start_Time
+    Is_Available (мера, 1 или 0)
+Логика для дашборда: Запрос агрегирует Is_Available за Dim_Date.Month = "текущий месяц", с фильтрами по Dim_LPU.LPU_Name и Dim_Doctor_Profile.Profile_Name (через связь с Dim_Doctor).
+
+Витрина 3: "Динамика обращений"
+Задача: Динамика обращений к врачам с гранулярностью "неделя".
+Таблица фактов: Fact_Visits
+    Date_SK (FK -> Dim_Date)
+    Doctor_SK (FK -> Dim_Doctor)
+    Patient_SK (FK -> Dim_Patient)
+    LPU_SK (FK -> Dim_LPU)
+    Visit_Count (мера, всегда = 1)
+Логика для дашборда: Запрос агрегирует Visit_Count и группирует по Dim_Date.Week. Фильтры работают по Dim_LPU.LPU_Name и Dim_Doctor_Profile.Profile_Name. Для ускорения может быть создана агрегированная таблица по неделям.
+
+Задание 2.3: Методология Data Vault
+
+Задача: Спроектировать единую реляционную БД в соответствии с методологией Data Vault (Hub, Link, Satellite).
+
+Проект решения:
+
+1. Хабы (Hubs) — Бизнес-сущности
+HUB_Patient (Patient_HashKey PK, Patient_SourceID, LoadDate, RecordSource)
+HUB_Doctor (Doctor_HashKey PK, Doctor_SourceID, LoadDate, RecordSource)
+HUB_LPU (LPU_HashKey PK, LPU_SourceID, LoadDate, RecordSource)
+HUB_Bed (Bed_HashKey PK, Bed_BusinessKey, LoadDate, RecordSource) — Бизнес-ключ может быть составным: "LPU_ID-Ward_Num-Bed_Num"
+HUB_Diagnosis (Diagnosis_HashKey PK, ICD_Code, LoadDate, RecordSource)
+
+2. Линки (Links) — Взаимосвязи между сущностями
+LINK_Visit (Link_Visit_HashKey PK, Patient_HashKey FK, Doctor_HashKey FK, LPU_HashKey FK, LoadDate, RecordSource) — Фиксирует факт визита.
+LINK_Hospitalization (Link_Hospitalization_HashKey PK, Patient_HashKey FK, Bed_HashKey FK, Link_Visit_HashKey FK, LoadDate, RecordSource) — Связывает госпитализацию с пациентом, койкой и визитом, который к ней привел.
+LINK_Doctor_Profile (Link_Doc_Prof_HashKey PK, Doctor_HashKey FK, Profile_BusinessKey, LoadDate, RecordSource) — Связь врача с его профилями.
+LINK_Schedule_Slot (Link_Slot_HashKey PK, Doctor_HashKey FK, LPU_HashKey FK, LoadDate, RecordSource) - Связывает слот расписания с врачом и ЛПУ.
+
+3. Сателлиты (Satellites) — Описательные атрибуты с историей изменений
+SAT_Patient_Details (Patient_HashKey PK, LoadDate PK, FIO, BirthDate, ...)
+SAT_Doctor_Details (Doctor_HashKey PK, LoadDate PK, FIO, ...)
+SAT_LPU_Info (LPU_HashKey PK, LoadDate PK, Name, Address, Phone, Profile)
+SAT_Bed_Info (Bed_HashKey PK, LoadDate PK, Ward_Type, Ward_Number, Department_Name)
+SAT_Diagnosis_Info (Diagnosis_HashKey PK, LoadDate PK, ICD_Name, Description)
+SAT_Visit_Details (Link_Visit_HashKey PK, LoadDate PK, Visit_DateTime, Diagnosis_HashKey FK, Is_Hospitalization_Referred) — Детали визита.
+SAT_Hospitalization_Period (Link_Hospitalization_HashKey PK, LoadDate PK, StartDate, EndDate) — Даты госпитализации.
+SAT_Schedule_Slot_Status (Link_Slot_HashKey PK, LoadDate PK, Slot_Time, is_booked) - Статус слота в расписании.

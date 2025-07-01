@@ -1,0 +1,91 @@
+Задача 1: Дан DataFrame orders:
+
++---------+--------+----------+
+| order_id | user_id | total_sum |
++---------+--------+----------+
+| 101     | 1      | 500.0    |
+| 102     | 1      | 300.0    |
+| 103     | 2      | 100.0    |
++---------+--------+----------+
+
+Задание: Найдите суммарные траты каждого пользователя (user_id) и отсортируйте по убыванию суммы.
+
+Напишите код на Spark SQL и DataFrame API.
+
+Ожидаемый вывод:
+
++--------+-----------+
+| user_id | total_spent |
++--------+-----------+
+| 1      | 800.0     |
+| 2      | 100.0     |
++--------+-----------+
+
+
+Задача 2: Дан DataFrame:
+data = [
+    ("Alice", 25, "Moscow"),
+    ("Bob", 30, "Moscow"),
+    ("Eve", 22, "London")
+]
+schema = StructType([
+    StructField("name", StringType(), True),
+    StructField("age", IntegerType(), True),
+    StructField("city", StringType(), True)
+])
+people_df = spark.createDataFrame(data, schema=schema)
+
+Задание:  
+1. Отфильтруйте людей старше 24 лет.  
+2. Сгруппируйте по city и посчитайте количество людей в каждом городе.
+
+Ожидаемый вывод:
+
++------+-----+
+|  city | count |
++------+-----+
+| Moscow | 2    |
++------+-----+
+
+Задание 3: Объясните разницу между Wide Transformation и Narrow Transformation в Spark. Приведите примеры.
+
+Задание 4: Как Spark определяет число партишнов (partitions) в RDD/DataFrame? Как это влияет на производительность?
+
+Задача 5: Анализ логов веб-сервера
+
+Дано: access.log (100 GB) вида:
+
+127.0.0.1 GET /index.html 200
+127.0.0.1 GET /api/user 404
+192.168.1.1 POST /login 200
+…
+
+Требуется:  
+1. Найти топ-10 самых активных IP (больше всего запросов).  
+2. Посчитать число ошибок (4xx/5xx статусы).  
+3. Вывести распределение запросов по HTTP-методам (GET/POST/PUT).
+
+Задача 6: Соединение таблиц
+
+Дано два CSV:
+
+users.csv:
+csv
+user_id,name,city
+1,Alice,Moscow
+2,Bob,London
+3,Eve,Paris
+
+orders.csv:
+csv
+order_id,user_id,total_sum
+101,1,500
+102,1,300
+103,2,100
+
+
+Требуется:  
+1. Вывести все заказы с именами пользователей (JOIN).  
+2. Найти города, где суммарный оборот > 500 (агре
+
+Напишите код на DataFrame API и Spark SQL

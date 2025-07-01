@@ -1,0 +1,252 @@
+Решение Midterm A 
+
+Задача 1. Проектирование схемы данных (Снежинка)
+
+Для аналитических запросов лучше всего подходит схема "звезда" или "снежинка". Выберем схему "снежинка", так как она лучше нормализует иерархическую структуру "Курс -> Модуль -> Урок -> Учебный элемент". Это позволяет избежать дублирования данных и упрощает поддержку справочников.
+
+Центральным элементом системы будет таблица фактов о прохождении учебных элементов (Fact_Progress), так как это основное событие, которое мы измеряем. Также добавим вторую таблицу фактов о регистрациях на курсы (Fact_Enrollments), чтобы эффективно отвечать на вопросы о времени регистрации студентов.
+
+-- 1. Таблицы-измерения (Dimensions)
+
+-- Измерение "Дата" для анализа по времени
+CREATE TABLE Dim_Date (
+    date_id          INT PRIMARY KEY, -- Пример: 20231121
+    full_date        DATE NOT NULL,
+    year             INT NOT NULL,
+    month            INT NOT NULL,
+    day              INT NOT NULL,
+    quarter          INT NOT NULL,
+    week_of_year     INT NOT NULL,
+    day_of_week_name VARCHAR(20) NOT NULL
+);
+
+-- Измерение "Студенты"
+CREATE TABLE Dim_Student (
+    student_id          INT PRIMARY KEY AUTO_INCREMENT,
+    student_name        VARCHAR(255) NOT NULL,
+    registration_date_id INT NOT NULL, -- Внешний ключ к Dim_Date
+    email               VARCHAR(255) UNIQUE NOT NULL,
+    FOREIGN KEY (registration_date_id) REFERENCES Dim_Date(date_id)
+);
+
+-- Измерение "Темы" (глобальный справочник)
+CREATE TABLE Dim_Topic (
+    topic_id   INT PRIMARY KEY AUTO_INCREMENT,
+    topic_name VARCHAR(255) NOT NULL UNIQUE
+);
+
+-- Измерение "Курсы"
+CREATE TABLE Dim_Course (
+    course_id   INT PRIMARY KEY AUTO_INCREMENT,
+    course_name VARCHAR(255) NOT NULL,
+    description TEXT
+);
+
+-- Измерение "Модули" (часть снежинки)
+CREATE TABLE Dim_Module (
+    module_id   INT PRIMARY KEY AUTO_INCREMENT,
+    module_name VARCHAR(255) NOT NULL,
+    course_id   INT NOT NULL,
+    sequence    INT NOT NULL, -- Порядок модуля в курсе
+    FOREIGN KEY (course_id) REFERENCES Dim_Course(course_id)
+);
+
+-- Измерение "Уроки" (часть снежинки)
+CREATE TABLE Dim_Lesson (
+    lesson_id   INT PRIMARY KEY AUTO_INCREMENT,
+    lesson_name VARCHAR(255) NOT NULL,
+    module_id   INT NOT NULL,
+    topic_id    INT NOT NULL,
+    sequence    INT NOT NULL, -- Порядок урока в модуле
+    FOREIGN KEY (module_id) REFERENCES Dim_Module(module_id),
+    FOREIGN KEY (topic_id) REFERENCES Dim_Topic(topic_id)
+);
+
+-- Измерение "Учебные элементы" (конец снежинки)
+CREATE TABLE Dim_Learning_Element (
+    element_id      INT PRIMARY KEY AUTO_INCREMENT,
+    element_type    ENUM('text', 'image', 'animation', 'video', 'audio', 'test', 'open_form') NOT NULL,
+    difficulty_level INT NOT NULL CHECK (difficulty_level BETWEEN 1 AND 5),
+    is_mandatory    BOOLEAN NOT NULL DEFAULT FALSE,
+    lesson_id       INT NOT NULL,
+    sequence        INT NOT NULL, -- Порядок элемента в уроке
+    FOREIGN KEY (lesson_id) REFERENCES Dim_Lesson(lesson_id)
+);
+
+
+-- 2. Таблицы фактов (Facts)
+
+-- Факт "Регистрация на курс"
+CREATE TABLE Fact_Enrollment (
+    enrollment_id      BIGINT PRIMARY KEY AUTO_INCREMENT,
+    student_id         INT NOT NULL,
+    course_id          INT NOT NULL,
+    enrollment_date_id INT NOT NULL, -- Дата регистрации на конкретный курс
+    FOREIGN KEY (student_id) REFERENCES Dim_Student(student_id),
+    FOREIGN KEY (course_id) REFERENCES Dim_Course(course_id),
+    FOREIGN KEY (enrollment_date_id) REFERENCES Dim_Date(date_id)
+);
+
+-- Факт "Прогресс по учебному элементу"
+CREATE TABLE Fact_Progress (
+    progress_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    student_id         INT NOT NULL,
+    element_id         INT NOT NULL,
+    start_time_id      INT NOT NULL, -- Внешний ключ к Dim_Date (для даты начала)
+    end_time_id        INT NOT NULL, -- Внешний ключ к Dim_Date (для даты окончания)
+    time_spent_seconds INT NOT NULL, -- Затраченное время в секундах
+    grade              DECIMAL(5, 2), -- Оценка, может быть NULL
+    FOREIGN KEY (student_id) REFERENCES Dim_Student(student_id),
+    FOREIGN KEY (element_id) REFERENCES Dim_Learning_Element(element_id),
+    FOREIGN KEY (start_time_id) REFERENCES Dim_Date(date_id),
+    FOREIGN KEY (end_time_id) REFERENCES Dim_Date(date_id)
+);
+
+
+Задача 2. Запросы на SQL
+
+Запрос 1: Найти, сколько максимально затрачено времени на урок в курсах сложности больше трех на тему Hadoop с видеоэлементами в зависимости от календарного месяца регистрации на курс.
+
+
+-- Предполагаем, что "сложность курса" определяется наличием в нем элементов с указанной сложностью.
+SELECT
+    d_reg.month AS registration_month,
+    l.lesson_name,
+    MAX(p.time_spent_seconds) / 60 AS max_time_spent_on_lesson_minutes -- Переводим в минуты для удобства
+FROM
+    Fact_Progress AS p
+-- Соединяем с элементами, чтобы получить их свойства
+JOIN Dim_Learning_Element AS le ON p.element_id = le.element_id
+-- Соединяем с уроками, чтобы получить тему и название урока
+JOIN Dim_Lesson AS l ON le.lesson_id = l.lesson_id
+-- Соединяем с темами, чтобы отфильтровать по 'Hadoop'
+JOIN Dim_Topic AS t ON l.topic_id = t.topic_id
+-- Соединяем с модулями и курсами, чтобы связать с регистрацией
+JOIN Dim_Module AS m ON l.module_id = m.module_id
+JOIN Dim_Course AS c ON m.course_id = c.course_id
+-- Соединяем с фактом регистрации, чтобы получить дату регистрации студента на курс
+JOIN Fact_Enrollment AS fe ON p.student_id = fe.student_id AND c.course_id = fe.course_id
+-- Соединяем с датой регистрации, чтобы сгруппировать по месяцу
+JOIN Dim_Date AS d_reg ON fe.enrollment_date_id = d_reg.date_id
+WHERE
+    le.difficulty_level > 3
+    AND le.element_type = 'video'
+    AND t.topic_name = 'Hadoop'
+GROUP BY
+    d_reg.month,
+    l.lesson_name
+ORDER BY
+    registration_month,
+    max_time_spent_on_lesson_minutes DESC;
+
+
+Запрос 2: Найти все темы, на которых училось максимальное количество студентов, зарегистрированных в прошлом году.
+
+
+-- Используем CTE (Common Table Expressions) для читаемости
+WITH TopicStudentCounts AS (
+    -- Шаг 1: Считаем уникальных студентов по каждой теме за прошлый год
+    SELECT
+        t.topic_name,
+        COUNT(DISTINCT fe.student_id) AS student_count
+    FROM
+        Fact_Enrollment AS fe
+    -- Соединяем с датой, чтобы отфильтровать по прошлому году
+    JOIN Dim_Date AS d ON fe.enrollment_date_id = d.date_id
+    -- Соединяем с курсом, модулем, уроком, чтобы добраться до темы
+    JOIN Dim_Course AS c ON fe.course_id = c.course_id
+    JOIN Dim_Module AS m ON c.course_id = m.course_id
+    JOIN Dim_Lesson AS l ON m.module_id = l.module_id
+    JOIN Dim_Topic AS t ON l.topic_id = t.topic_id
+    WHERE
+        d.year = YEAR(CURRENT_DATE) - 1 -- Фильтр по прошлому году
+    GROUP BY
+        t.topic_name
+)
+-- Шаг 2: Находим темы, у которых количество студентов равно максимальному
+SELECT
+    topic_name
+FROM
+    TopicStudentCounts
+WHERE
+    student_count = (SELECT MAX(student_count) FROM TopicStudentCounts);
+
+
+Задача 3. Проектирование схемы данных в Redis
+
+В Redis нет таблиц и связей, поэтому мы проектируем структуру ключей и используем разные типы данных Redis (HASH, SET, ZSET) для хранения и индексации информации.
+
+1. Хранение основного прогресса студента (HASH)
+Это самая частая операция — обновление прогресса. HASH подходит для хранения атрибутов одного объекта.
+
+- Ключ: progress:student:{student_id}:element:{element_id}
+- Тип: HASH
+- Значения (поля):
+    - start_time: (timestamp)
+    - end_time: (timestamp)
+    - grade: (число)
+    - status: "completed" / "in_progress"
+
+2. Хранение структуры курса (SET и ZSET)
+Для навигации и получения списков.
+
+- Курсы студента:
+    - Ключ: student:{student_id}:courses
+    - Тип: SET
+    - Значение: {course_id_1}, {course_id_2}
+- Студенты на курсе (для обратного поиска):
+    - Ключ: course:{course_id}:students
+    - Тип: SET
+    - Значение: {student_id_1}, {student_id_2}
+- Элементы в уроке (с сохранением порядка):
+    - Ключ: lesson:{lesson_id}:elements
+    - Тип: ZSET (упорядоченное множество)
+    - Значение: member - {element_id}, score - порядковый номер элемента в уроке.
+
+3. Индексы для быстрого поиска (SET)
+Это самая важная часть для выполнения аналитических запросов. Мы создаем "инвертированные индексы" вручную.
+
+- Элементы по типу:
+    - Ключ: index:element_type:video
+    - Тип: SET
+    - Значение: {element_id_1}, {element_id_5}, ...
+- Элементы по сложности:
+    - Ключ: index:difficulty:{level} (например, index:difficulty:4)
+    - Тип: SET
+    - Значение: {element_id_2}, {element_id_8}, ...
+- Уроки по теме:
+    - Ключ: index:topic:Hadoop
+    - Тип: SET
+    - Значение: {lesson_id_1}, {lesson_id_10}, ...
+- Студенты по месяцу регистрации:
+    - Ключ: index:registration_date:{YYYY-MM} (например, index:registration_date:2023-10)
+    - Тип: SET
+    - Значение: {student_id_1}, {student_id_2}, ...
+- Курсы по теме и сложности (для задачи 5, денормализация):
+    - Ключ: index:course:topic:Hadoop -> SET из {course_id}
+    - Ключ: index:course:difficulty:4 -> SET из {course_id}
+
+Задача 4. Запросы к БД Redis 
+
+Запрос 1: Найти все курсы про Hadoop со сложностью больше трех.
+
+Здесь мы можем использовать команду SINTER (пересечение множеств), если мы создали соответствующие индексы для курсов.
+
+Шаг 1: Найти курсы со сложностью 4 ИЛИ 5.
+SUNIONSTORE temp:hard_courses index:course:difficulty:4 index:course:difficulty:5
+
+Шаг 2: Найти пересечение "сложных" курсов с курсами по теме Hadoop.
+SINTER temp:hard_courses index:course:topic:Hadoop
+
+Эта команда вернет SET с ID курсов, удовлетворяющих условиям.
+После использования временного ключа его стоит удалить:
+DEL temp:hard_courses
+
+Запрос 2: Найти всех студентов, зарегистрированных в прошлом году.
+
+Этот запрос очень эффективен в Redis, если мы индексируем регистрации по месяцам.
+
+Генерируем ключи для всех месяцев прошлого года (например, 2023)
+SUNION index:registration_date:2023-01 index:registration_date:2023-02 index:registration_date:2023-03 index:registration_date:2023-04 index:registration_date:2023-05 index:registration_date:2023-06 index:registration_date:2023-07 index:registration_date:2023-08 index:registration_date:2023-09 index:registration_date:2023-10 index:registration_date:2023-11 index:registration_date:2023-12
+
+Эта одна команда вернет SET со всеми уникальными ID студентов, зарегистрировавшихся в прошлом году.

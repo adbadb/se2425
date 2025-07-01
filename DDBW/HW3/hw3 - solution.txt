@@ -1,0 +1,289 @@
+Задача 1: Дан DataFrame orders:
+
++---------+--------+----------+
+| order_id | user_id | total_sum |
++---------+--------+----------+
+| 101     | 1      | 500.0    |
+| 102     | 1      | 300.0    |
+| 103     | 2      | 100.0    |
++---------+--------+----------+
+
+Найдите суммарные траты каждого пользователя (user_id) и отсортируйте по убыванию суммы.
+Ожидаемый вывод:
++--------+-----------+
+| user_id | total_spent |
++--------+-----------+
+| 1      | 800.0     |
+| 2      | 100.0     |
++--------+-----------+
+
+Напишите код на Spark SQL и DataFrame API.
+
+Решение (DataFrame API):
+resultDF = orders.groupBy("user_id")
+  .agg(sum("total_sum").as("total_spent"))
+  .orderBy(desc("total_spent"))
+resultDF.show()
+
+Решение (Spark SQL):
+orders.createOrReplaceTempView("orders")
+sqlResult = spark.sql("""
+  SELECT user_id, SUM(total_sum) AS total_spent
+  FROM orders
+  GROUP BY user_id
+  ORDER BY total_spent DESC
+""")
+sqlResult.show()
+
+
+Задача 2: Дан DataFrame:
+data = [
+    ("Alice", 25, "Moscow"),
+    ("Bob", 30, "Moscow"),
+    ("Eve", 22, "London")
+]
+schema = StructType([
+    StructField("name", StringType(), True),
+    StructField("age", IntegerType(), True),
+    StructField("city", StringType(), True)
+])
+people_df = spark.createDataFrame(data, schema=schema)
+
+Задание:  
+1. Отфильтруйте людей старше 24 лет.  
+2. Сгруппируйте по city и посчитайте количество людей в каждом городе.
+
+Ожидаемый вывод:
+
++------+-----+
+|  city | count |
++------+-----+
+| Moscow | 2    |
++------+-----+
+
+filtered_people_df = people_df.filter(col("age") > 24)
+city_counts_df = people_df.groupBy("city").count()
+city_counts_df.show()
+
+
+Задание 3: Объясните разницу между Wide Transformation и Narrow Transformation в Spark. Приведите примеры.
+
+Правильный ответ:  
+- Narrow Transformation (узкая):  
+  - Каждый входной партишн (фрагмент данных) порождает ровно один выходной партишн.  
+  - Пример: map(), filter() — данные не перемешиваются между узлами.  
+  - Выполняется быстро, так как не требует обмена данными (shuffle) между executor’ами.
+
+- Wide Transformation (широкая):  
+  - Один входной партишн порождает несколько выходных партишнов (требуется shuffle).  
+  - Пример: groupByKey(), join(), reduceByKey(), sortByKey().  
+  - Происходит пересылка данных между узлами (дорого по сети и диску).
+
+rdd = sc.parallelize(range(1, 11), 2)
+print("Исходные партишны:")
+print(rdd.glom().collect())
+# Вывод: [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]]
+
+# --- NARROW: map() ---
+# Применяем map к каждому элементу. Эта операция не требует данных из других партишнов.
+print("NARROW: применяем map(lambda x: x * 2)")
+mapped_rdd = rdd.map(lambda x: x * 2)
+# Проверяем результат. Структура партишнов сохранилась.
+print("Результат после map (партишны не перемешиваются):")
+print(mapped_rdd.glom().collect())
+# Вывод: [[2, 4, 6, 8, 10], [12, 14, 16, 18, 20]]
+# Каждый исходный партишн породил ровно один новый. Shuffle не было.
+print("-" * 40)
+
+
+# --- WIDE: reduceByKey() ---
+# Сначала создаем пары (ключ, значение), где ключ - это четность числа.
+print("WIDE: применяем reduceByKey(add)")
+pairs_rdd = rdd.map(lambda x: (x % 2, x))
+print("Промежуточный RDD из пар (ключ, значение) до shuffle:")
+print(pairs_rdd.glom().collect())
+# Вывод: [[(1, 1), (0, 2), (1, 3), (0, 4), (1, 5)], [(0, 6), (1, 7), (0, 8), (1, 9), (0, 10)]]
+
+# Теперь применяем reduceByKey.
+# Чтобы сложить все значения для ключа 0, Spark должен собрать их со ВСЕХ партишнов.
+# То же самое для ключа 1. Это и есть SHUFFLE.
+summed_rdd = pairs_rdd.reduceByKey(add)
+
+print("\nРезультат после reduceByKey (произошел SHUFFLE):")
+# Данные были перегруппированы по ключу между узлами.
+# Ключ 0 (четные): 2+4+6+8+10 = 30
+# Ключ 1 (нечетные): 1+3+5+7+9 = 25
+print(summed_rdd.collect())
+# Вывод: [(0, 30), (1, 25)] (порядок может отличаться)
+
+Задание 4: Как Spark определяет число партишнов (partitions) в RDD/DataFrame? Как это влияет на производительность?
+
+Правильный ответ:  
+1. Для RDD:  
+   - При создании из коллекции: sc.parallelize(data, numPartitions) (по умолчанию берётся spark.default.parallelism, обычно = числу ядер кластера).  
+   - При чтении файла: sc.textFile(path, minPartitions) (HDFS блоки по 128MB → 1 блок ≈ 1 партишн).  
+   - После shuffle-операций (join, groupBy): число партишнов = spark.sql.shuffle.partitions (по умолчанию 200).
+
+2. Для DataFrame:  
+   - spark.read.csv(…) → число партишнов зависит от размера файла и spark.sql.files.maxPartitionBytes (~128MB).  
+   - После df.repartition(10) — явное указание числа партишнов.  
+   - После df.coalesce(2) — уменьшение числа партишнов (без полного shuffle).
+
+Влияние на производительность:  
+- Мало партишнов (например, 1-2) → не распараллеливается (1 ядро работает, остальные ждут).  
+- Очень много партишнов (10 000+) → избыточный overhead на управление задачами (планирование, метаданные).  
+- Оптимум: 2-4 партишна на каждое ядро CPU в кластере.
+
+Эвристика:  
+- Если данные ≈ 1-10 GB, ставьте spark.sql.shuffle.partitions = 200…500.  
+- Если < 100 MB, можно coalesce(1) перед сохранением.
+
+
+Задача 5: Анализ логов веб-сервера
+
+Дано: access.log (100 GB) вида:
+
+127.0.0.1 GET /index.html 200
+127.0.0.1 GET /api/user 404
+192.168.1.1 POST /login 200
+…
+
+Требуется:  
+1. Найти топ-10 самых активных IP (больше всего запросов).  
+2. Посчитать число ошибок (4xx/5xx статусы).  
+3. Вывести распределение запросов по HTTP-методам (GET/POST/PUT).
+
+Решение (RDD API)
+from operator import add
+logs_rdd = spark.sparkContext.textFile("access.log")
+
+# 1. Топ-10 IP
+ip_counts = logs_rdd.map(lambda line: line.split(" ")[0]) \
+    .map(lambda ip: (ip, 1)) \
+    .reduceByKey(add) \
+    .sortBy(lambda x: x[1], ascending=False) \
+    .take(10)
+
+# 2. Ошибки 4xx/5xx
+errors = logs_rdd.filter(lambda line: 400 <= int(line.split(" ")[3]) < 600).count()
+
+# 3. HTTP-методы
+methods = logs_rdd.map(lambda line: line.split(" ")[1]) \
+    .map(lambda method: (method, 1)) \
+    .reduceByKey(add) \
+    .collect()
+
+print("--- RDD API Результаты ---")
+print(f"Топ IP: {ip_counts}")
+print(f"Ошибок: {errors}")
+print(f"Методы: {methods}")
+
+Решение (DataFrame API)
+
+from pyspark.sql.functions import split, col, desc
+# Читаем лог как DataFrame из одной колонки "value"
+logs_df = spark.read.text("access.log")
+
+parsed_logs_df = logs_df.withColumn("ip", split(col("value"), " ")[0]) \
+                        .withColumn("method", split(col("value"), " ")[1]) \
+                        .withColumn("status", split(col("value"), " ")[3].cast("int"))
+
+print("\n--- DataFrame API Результаты ---")
+
+# 1. Топ-10 IP
+print("1. Топ-10 IP:")
+parsed_logs_df.groupBy("ip").count() \
+    .orderBy(desc("count")) \
+    .limit(10) \
+    .show()
+
+# 2. Ошибки
+error_count = parsed_logs_df.filter(col("status").between(400, 599)).count()
+print(f"2. Всего ошибок (4xx/5xx): {error_count}")
+
+# 3. HTTP-методы
+print("3. Распределение запросов по методам:")
+parsed_logs_df.groupBy("method").count().show()
+
+Задача 6: Соединение таблиц
+
+Дано два CSV:
+
+users.csv:
+csv
+user_id,name,city
+1,Alice,Moscow
+2,Bob,London
+3,Eve,Paris
+
+orders.csv:
+csv
+order_id,user_id,total_sum
+101,1,500
+102,1,300
+103,2,100
+
+
+Требуется:  
+1. Вывести все заказы с именами пользователей 
+2. Найти города, где суммарный оборот > 500
+
+Ожидаемый вывод 1:
++-----+---------+----------+
+| name | order_id | total_sum |
++-----+---------+----------+
+| Alice | 101     | 500      |
+| Alice | 102     | 300      |
+| Bob   | 103     | 100      |
++-----+---------+----------+
+
+Ожидаемый вывод 2:
++------+-------------+
+| city  | total_revenue |
++------+-------------+
+| Moscow | 800        | // 500 + 300 от Alice
++------+-------------+
+
+
+Решение (DataFrame API):
+users = spark.read
+  .option("header", "true")
+  .option("inferSchema", "true")
+  .csv("users.csv")
+
+orders = spark.read
+  .option("header", "true")
+  .option("inferSchema", "true")
+  .csv("orders.csv")
+
+// 1. Все заказы с именами пользователей (INNER JOIN)
+ordersWithUsers = users.join(orders, "user_id", "inner")
+  .select("name", "order_id", "total_sum")
+ordersWithUsers.show()
+
+// 2. Города, где суммарный оборот > 500
+cityRevenue = users.join(orders, "user_id", "inner")
+  .groupBy("city")
+  .agg(sum("total_sum").as("total_revenue"))
+  .filter($"total_revenue" > 500)
+cityRevenue.show()
+
+
+Тот же пример через Spark SQL (для сравнения):
+users.createOrReplaceTempView("users")
+orders.createOrReplaceTempView("orders")
+
+spark.sql("""
+  SELECT u.name, o.order_id, o.total_sum
+  FROM users u
+  JOIN orders o ON u.user_id = o.user_id
+""").show()
+
+spark.sql("""
+  SELECT u.city, SUM(o.total_sum) as revenue
+  FROM users u
+  JOIN orders o ON u.user_id = o.user_id
+  GROUP BY u.city
+  HAVING SUM(o.total_sum) > 500
+""").show()
+

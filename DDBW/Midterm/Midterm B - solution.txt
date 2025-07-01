@@ -1,0 +1,178 @@
+Решение Midterm B 
+
+Для аналитических запросов мы спроектируем схему "снежинка". Центральным элементом будет таблица фактов о позициях в заказе (Fact_Sales), так как это основное событие, которое генерирует выручку и бонусные баллы. Отдельно создадим таблицу фактов о транзакциях с баллами (Fact_Bonus_Transactions), чтобы точно отслеживать историю начислений, списаний и сгораний.
+
+-- Измерение "Дата" для анализа по времени
+CREATE TABLE Dim_Date (
+    date_id          INT PRIMARY KEY, -- Пример: 20240521
+    full_date        DATE NOT NULL,
+    year             INT NOT NULL,
+    month            INT NOT NULL,
+    day              INT NOT NULL,
+    quarter          INT NOT NULL,
+    week_of_year     INT NOT NULL,
+    day_of_week_name VARCHAR(20) NOT NULL
+);
+
+-- Измерение "Клиенты"
+CREATE TABLE Dim_Client (
+    client_id           INT PRIMARY KEY AUTO_INCREMENT,
+    full_name           VARCHAR(255) NOT NULL,
+    email               VARCHAR(255) UNIQUE,
+    phone               VARCHAR(50) UNIQUE,
+    birth_date          DATE,
+    registration_date_id INT NOT NULL, -- FK к Dim_Date
+    -- Текущее количество баллов - это вычисляемая метрика (из таблицы фактов), а не атрибут измерения
+    FOREIGN KEY (registration_date_id) REFERENCES Dim_Date(date_id)
+);
+
+-- Измерение "Категории блюд" (часть снежинки)
+CREATE TABLE Dim_Category (
+    category_id   INT PRIMARY KEY AUTO_INCREMENT,
+    category_name VARCHAR(255) NOT NULL UNIQUE,
+    description   TEXT
+);
+
+-- Измерение "Блюда" (связано с категориями)
+CREATE TABLE Dim_Dish (
+    dish_id     INT PRIMARY KEY AUTO_INCREMENT,
+    dish_name   VARCHAR(255) NOT NULL,
+    description TEXT,
+    category_id INT NOT NULL,
+    -- Цена может меняться, поэтому в таблице фактов будет цена на момент продажи.
+    -- Здесь можно хранить текущую цену для операционных нужд.
+    current_price DECIMAL(10, 2) NOT NULL,
+    FOREIGN KEY (category_id) REFERENCES Dim_Category(category_id)
+);
+
+-- Факт "Продажи" (Позиции в заказе)
+-- Гранулярность: одна строка на каждую позицию в заказе (например, 2 пиццы "Маргарита" в одном заказе - это одна строка).
+CREATE TABLE Fact_Sales (
+    sales_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    order_number    VARCHAR(50) NOT NULL, -- Вырожденное измерение (Degenerate Dimension)
+    order_date_id   INT NOT NULL,
+    client_id       INT NOT NULL,
+    dish_id         INT NOT NULL,
+    quantity        INT NOT NULL,
+    price_at_sale   DECIMAL(10, 2) NOT NULL, -- Цена на момент продажи
+    line_total      DECIMAL(10, 2) NOT NULL, -- quantity * price_at_sale
+    FOREIGN KEY (order_date_id) REFERENCES Dim_Date(date_id),
+    FOREIGN KEY (client_id) REFERENCES Dim_Client(client_id),
+    FOREIGN KEY (dish_id) REFERENCES Dim_Dish(dish_id)
+);
+
+-- Факт "Транзакции с бонусными баллами"
+-- Гранулярность: одна строка на каждое изменение баланса (начисление, списание, сгорание).
+CREATE TABLE Fact_Bonus_Transactions (
+    transaction_id        BIGINT PRIMARY KEY AUTO_INCREMENT,
+    client_id             INT NOT NULL,
+    order_number          VARCHAR(50), -- NULL для транзакций, не связанных с заказом (например, сгорание)
+    transaction_date_id   INT NOT NULL,
+    expiration_date_id    INT, -- NULL, если неприменимо (например, для списания)
+    transaction_type      ENUM('earned', 'spent', 'expired', 'gift') NOT NULL,
+    points_change         INT NOT NULL, -- Положительное для начисления, отрицательное для списания/сгорания
+    FOREIGN KEY (client_id) REFERENCES Dim_Client(client_id),
+    FOREIGN KEY (transaction_date_id) REFERENCES Dim_Date(date_id),
+    FOREIGN KEY (expiration_date_id) REFERENCES Dim_Date(date_id)
+);
+
+
+Задача 2. Запросы на SQL
+
+Запрос 1: "Найди 10 максимальных значений накопленных баллов за всю историю программы лояльности и выведи соответствующих клиентов и по три максимальных начисления баллов для каждого".
+
+Этот сложный запрос требует использования оконных функций (ROW_NUMBER) и CTE (Common Table Expressions).
+
+-- Используем CTE для пошагового решения
+WITH ClientTotalEarned AS (
+    -- Шаг 1: Считаем общую сумму накопленных баллов для каждого клиента
+    SELECT
+        client_id,
+        SUM(points_change) AS total_earned_points
+    FROM
+        Fact_Bonus_Transactions
+    WHERE
+        transaction_type = 'earned'
+    GROUP BY
+        client_id
+),
+Top10Clients AS (
+    -- Шаг 2: Отбираем 10 клиентов с максимальным накоплением
+    SELECT
+        client_id,
+        total_earned_points
+    FROM
+        ClientTotalEarned
+    ORDER BY
+        total_earned_points DESC
+    LIMIT 10
+),
+RankedAccruals AS (
+    -- Шаг 3: Для ВСЕХ начислений ранжируем их по убыванию для каждого клиента
+    SELECT
+        client_id,
+        points_change,
+        order_number,
+        transaction_date_id,
+        ROW_NUMBER() OVER(PARTITION BY client_id ORDER BY points_change DESC) as rn
+    FROM
+        Fact_Bonus_Transactions
+    WHERE
+        transaction_type = 'earned'
+)
+-- Шаг 4: Собираем итоговый результат
+SELECT
+    c.full_name,
+    tc.total_earned_points,
+    ra.points_change AS accrual_amount,
+    ra.order_number,
+    d.full_date AS accrual_date
+FROM
+    Top10Clients tc
+JOIN
+    Dim_Client c ON tc.client_id = c.client_id
+JOIN
+    RankedAccruals ra ON tc.client_id = ra.client_id
+JOIN
+    Dim_Date d ON ra.transaction_date_id = d.date_id
+WHERE
+    ra.rn <= 3 -- Оставляем только топ-3 начисления для каждого из топ-10 клиентов
+ORDER BY
+    tc.total_earned_points DESC,
+    c.full_name,
+    ra.points_change DESC;
+
+
+
+Запрос 2: "Составь отчет по горячим напиткам за май 2024 года: сколько баллов было начислено за их покупку клиентами с разными годами регистрации в системе лояльности".
+
+Этот запрос требует соединения двух таблиц фактов через общие измерения (клиент, заказ).
+
+-- Мы будем агрегировать баллы, начисленные за ЗАКАЗЫ, в которых были горячие напитки.
+SELECT
+    d_reg.year AS registration_year,
+    SUM(fbt.points_change) AS total_points_earned
+FROM
+    Fact_Bonus_Transactions fbt
+-- Соединяем с датой транзакции, чтобы отфильтровать по маю 2024
+JOIN Dim_Date d_trans ON fbt.transaction_date_id = d_trans.date_id
+-- Соединяем с клиентом, чтобы получить дату его регистрации
+JOIN Dim_Client cli ON fbt.client_id = cli.client_id
+JOIN Dim_Date d_reg ON cli.registration_date_id = d_reg.date_id
+WHERE
+    fbt.transaction_type = 'earned'
+    AND d_trans.year = 2024
+    AND d_trans.month = 5
+    -- Используем подзапрос, чтобы убедиться, что транзакция связана с заказом,
+    -- в котором был куплен "горячий напиток"
+    AND fbt.order_number IN (
+        SELECT DISTINCT fs.order_number
+        FROM Fact_Sales fs
+        JOIN Dim_Dish d ON fs.dish_id = d.dish_id
+        JOIN Dim_Category cat ON d.category_id = cat.category_id
+        WHERE cat.category_name = 'Горячие напитки'
+    )
+GROUP BY
+    d_reg.year
+ORDER BY
+    registration_year;
